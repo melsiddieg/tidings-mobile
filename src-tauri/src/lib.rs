@@ -168,16 +168,66 @@ fn seed_default_feeds(state: &state::AppState) {
     ];
 
     let conn = state.db();
-    if db::get_value(&conn, SEED_KEY).is_some() {
-        return;
-    }
-    if let Ok((folder_id, _)) = db::find_or_create_folder(&conn, "Jupiter Broadcasting", None) {
-        for &(url, title, site_url) in JB_FEEDS {
-            if db::feed_id_by_url(&conn, url).ok().flatten().is_none() {
-                let _ = db::insert_feed(&conn, url, Some(folder_id), Some(title), Some(site_url));
+    if db::get_value(&conn, SEED_KEY).is_none() {
+        if let Ok((folder_id, _)) = db::find_or_create_folder(&conn, "Jupiter Broadcasting", None) {
+            for &(url, title, site_url) in JB_FEEDS {
+                if db::feed_id_by_url(&conn, url).ok().flatten().is_none() {
+                    let _ = db::insert_feed(&conn, url, Some(folder_id), Some(title), Some(site_url));
+                }
             }
+            let _ = db::set_value(&conn, SEED_KEY, "1");
         }
-        let _ = db::set_value(&conn, SEED_KEY, "1");
+    }
+
+    const TOP_PODCASTS_KEY: &str = "default_top_podcasts_seeded_v1";
+    const TOP_PODCASTS: &[(&str, &str, &str)] = &[
+        (
+            "https://feeds.simplecast.com/dHoohVNH",
+            "Team Coco: Conan O’Brien Needs A Friend",
+            "https://teamcoco.com/podcasts/conan-obrien-needs-a-friend",
+        ),
+        (
+            "https://feeds.npr.org/344098539/podcast.xml",
+            "NPR: Wait Wait... Don't Tell Me!",
+            "https://www.npr.org/programs/wait-wait-dont-tell-me/",
+        ),
+        (
+            "https://feeds.simplecast.com/4T39_jAj",
+            "StarTalk Radio",
+            "https://startalkmedia.com/",
+        ),
+    ];
+
+    if db::get_value(&conn, TOP_PODCASTS_KEY).is_none() {
+        let mut top_items = Vec::new();
+        for &(url, title, site_url) in TOP_PODCASTS {
+            let id = match db::feed_id_by_url(&conn, url).ok().flatten() {
+                Some(existing) => existing,
+                None => match db::insert_feed(&conn, url, None, Some(title), Some(site_url)) {
+                    Ok(new_id) => new_id,
+                    Err(_) => continue,
+                },
+            };
+            top_items.push((id, title));
+        }
+        if !top_items.is_empty() {
+            let shift = top_items.len() as i64;
+            let _ = conn.execute(
+                "UPDATE folders SET position = position + ?1 WHERE parent_id IS NULL",
+                [shift],
+            );
+            let _ = conn.execute(
+                "UPDATE feeds SET position = position + ?1 WHERE folder_id IS NULL",
+                [shift],
+            );
+            for (idx, (id, title)) in top_items.into_iter().enumerate() {
+                let _ = conn.execute(
+                    "UPDATE feeds SET folder_id = NULL, position = ?1, custom_title = COALESCE(NULLIF(custom_title, ''), ?3) WHERE id = ?2",
+                    rusqlite::params![idx as i64, id, title],
+                );
+            }
+            let _ = db::set_value(&conn, TOP_PODCASTS_KEY, "1");
+        }
     }
 }
 

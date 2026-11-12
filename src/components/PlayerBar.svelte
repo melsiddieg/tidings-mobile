@@ -35,11 +35,8 @@
   preload="metadata"
   ontimeupdate={() => player.onTime()}
   ondurationchange={() => audio && Number.isFinite(audio.duration) && (player.duration = audio.duration)}
-  onplay={() => (player.playing = true)}
-  onpause={() => {
-    player.playing = false;
-    player.savePosition();
-  }}
+  onplay={() => player.onPlay()}
+  onpause={() => player.onPause()}
   onwaiting={() => (player.loading = true)}
   onplaying={() => (player.loading = false)}
   oncanplay={() => (player.loading = false)}

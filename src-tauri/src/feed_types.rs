@@ -82,6 +82,7 @@ fn type_from_url(raw: &str) -> Option<&'static str> {
         "podbean.com", "captivate.fm", "fireside.fm", "acast.com", "omny.fm", "spreaker.com", "podhome.fm",
         "jupiter.zone", "linuxunplugged.com", "selfhosted.show", "coder.show", "linuxactionnews.com",
         "extras.show", "weeklylaunch.rocks", "jupiterstation.live",
+        "teamcoco.com", "npr.org", "startalkmedia.com",
     ];
 
     if VIDEO_SITES.iter().any(|d| on(d)) {

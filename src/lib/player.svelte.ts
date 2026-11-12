@@ -155,6 +155,19 @@ class Player {
     this.episode = null;
     this.playing = false;
     this.error = null;
+    this.syncNativePlayback();
+  }
+
+  onPlay() {
+    this.playing = true;
+    this.updateMediaSession();
+    this.syncNativePlayback();
+  }
+
+  onPause() {
+    this.playing = false;
+    this.savePosition();
+    this.syncNativePlayback();
   }
 
   // Events from the <audio> element ------------------------------------------
@@ -175,6 +188,7 @@ class Player {
   onEnded() {
     const ep = this.episode;
     this.playing = false;
+    this.syncNativePlayback();
     if (!ep) return;
     this.forgetPosition(ep.url);
     store.markRead([ep.articleId], true);
@@ -199,6 +213,7 @@ class Player {
     }
     this.loading = false;
     this.playing = false;
+    this.syncNativePlayback();
     this.error = ep.listen ? 'The audio of this video could not be played.' : 'This episode could not be played.';
   }
 
@@ -241,6 +256,27 @@ class Player {
       navigator.mediaSession.setActionHandler('seekto', (d) => d.seekTime != null && this.seek(d.seekTime));
     } catch {
       /* not supported by this web view */
+    }
+  }
+
+  private syncNativePlayback() {
+    if ('mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.playbackState = !this.episode ? 'none' : this.playing ? 'playing' : 'paused';
+      } catch {
+        /* ignore */
+      }
+    }
+    const bridge = (window as unknown as {
+      TidingsAndroid?: { setAudioPlaybackState?: (playing: boolean, title: string, artist: string) => void };
+    }).TidingsAndroid;
+    if (bridge?.setAudioPlaybackState) {
+      const feed = this.episode ? store.feedById.get(this.episode.feedId) : undefined;
+      bridge.setAudioPlaybackState(
+        Boolean(this.playing && this.episode),
+        this.episode?.title ?? '',
+        feed?.title ?? 'Tidings',
+      );
     }
   }
 }
