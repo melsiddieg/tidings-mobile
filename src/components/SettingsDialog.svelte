@@ -830,4 +830,34 @@
   .about li :global(svg) {
     color: var(--success);
   }
+  @media (max-width: 720px) {
+    .settings {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
+      height: min(82dvh, 660px);
+    }
+    nav {
+      display: flex;
+      overflow-x: auto;
+      padding: 8px 10px;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      gap: 4px;
+    }
+    nav h2 {
+      display: none;
+    }
+    .nav-item {
+      flex: none;
+      white-space: nowrap;
+      height: 34px;
+    }
+    .content {
+      padding: 12px 16px 24px;
+    }
+    .row {
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+  }
 </style>

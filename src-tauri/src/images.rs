@@ -25,6 +25,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::borrow::Cow;
 use std::collections::HashSet;
+#[cfg(not(target_os = "android"))]
 use std::hash::{BuildHasher, RandomState};
 use std::io::Cursor;
 use std::num::NonZeroU64;
@@ -41,7 +42,9 @@ use resvg::usvg::fontdb;
 use resvg::{tiny_skia, usvg};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, Semaphore};
+#[cfg(not(target_os = "android"))]
+use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 
 /// How large a re-encoded image may be, and the format it ends up in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +301,7 @@ impl Drawer {
 /// the SVG is refused, when it stops the helper (a crash, or too much memory) and
 /// when it takes too long. The helper is then stopped, and the next SVG starts a
 /// new one.
+#[cfg(not(target_os = "android"))]
 async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
     static DRAWER: LazyLock<Mutex<Drawer>> = LazyLock::new(Mutex::default);
     static KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
@@ -326,6 +330,25 @@ async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
             None
         }
     }
+}
+
+/// On Android, the app runs inside the Zygote process rather than a standalone
+/// executable, so SVGs are drawn on a dedicated thread with an 8 MB stack.
+#[cfg(target_os = "android")]
+async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
+    if bytes.len() > MAX_SVG_BYTES {
+        return None;
+    }
+    let data = bytes.to_vec();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("tidings-svg".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let _ = tx.send(svg(&data, usage));
+        })
+        .ok()?;
+    tokio::time::timeout(WORKER_TIMEOUT, rx).await.ok()?.ok().flatten()
 }
 
 /// The SVG helper process: `main` calls this, and nothing else, when the program
@@ -467,6 +490,10 @@ fn fonts() -> Arc<fontdb::Database> {
             db.set_sans_serif_family("DejaVu Sans");
             db.set_serif_family("DejaVu Serif");
             db.set_monospace_family("DejaVu Sans Mono");
+        } else if cfg!(target_os = "android") {
+            db.set_sans_serif_family("Roboto");
+            db.set_serif_family("Noto Serif");
+            db.set_monospace_family("Droid Sans Mono");
         }
         Arc::new(db)
     });

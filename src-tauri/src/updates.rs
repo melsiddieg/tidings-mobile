@@ -112,6 +112,7 @@ pub async fn check_online(net: &Net, today: NaiveDate) -> (Vec<Component>, Optio
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Install {
     MacApp,
+    Android,
     Flatpak,
     Snap,
     AppImage,
@@ -124,6 +125,8 @@ enum Install {
 fn install() -> Install {
     if cfg!(target_os = "macos") {
         Install::MacApp
+    } else if cfg!(target_os = "android") {
+        Install::Android
     } else if std::env::var_os("FLATPAK_ID").is_some() || Path::new("/.flatpak-info").exists() {
         Install::Flatpak
     } else if std::env::var_os("SNAP").is_some() {
@@ -141,6 +144,7 @@ fn install() -> Install {
 fn tidings_update() -> (&'static str, Option<&'static str>, Option<&'static str>) {
     match install() {
         Install::MacApp => ("Download the newest .dmg from the releases page.", None, Some(RELEASES_PAGE)),
+        Install::Android => ("Download the newest .apk from the releases page.", None, Some(RELEASES_PAGE)),
         Install::Flatpak => ("Update it in your software center, or run:", Some("flatpak update"), None),
         Install::Snap => ("Update it in your software center, or run:", Some("sudo snap refresh"), None),
         Install::AppImage => (
@@ -411,6 +415,20 @@ fn newest_webkit_series(today: NaiveDate) -> u32 {
 }
 
 fn webkit(today: NaiveDate) -> Component {
+    if cfg!(target_os = "android") {
+        return Component {
+            id: "webkit",
+            name: "Android System WebView".into(),
+            version: None,
+            detail: Some("part of Android".into()),
+            status: Status::Info,
+            message: "Android System WebView, which shows articles, gets its security fixes \
+                      from Google Play and Android system updates."
+                .into(),
+            command: None,
+            link: None,
+        };
+    }
     if !cfg!(webkitgtk) {
         return Component {
             id: "webkit",

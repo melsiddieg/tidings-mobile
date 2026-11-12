@@ -1061,3 +1061,29 @@ kbd {
 .episode-play:active {
   transform: scale(0.95);
 }
+
+.mobile-back-btn {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .mobile-back-btn {
+    display: inline-grid;
+  }
+  .article {
+    padding: 24px 18px 64px;
+  }
+  .article.wide {
+    padding-top: 28px;
+  }
+  .article-title {
+    font-size: calc(var(--reader-size) * 1.45);
+  }
+  .icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+  .tree-row {
+    height: 36px;
+  }
+}

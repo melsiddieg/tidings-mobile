@@ -188,4 +188,12 @@
     height: auto;
     padding: 24px;
   }
+  @media (max-width: 860px) {
+    .card {
+      padding: 24px 18px 18px;
+    }
+    .card-foot {
+      flex-wrap: wrap;
+    }
+  }
 </style>

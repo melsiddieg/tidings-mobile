@@ -22,6 +22,7 @@
 
   onMount(() => {
     store.init();
+    (window as unknown as { __tidingsBack?: () => boolean }).__tidingsBack = () => store.handleBack();
   });
 
   // Unread count on the dock / launcher icon.
@@ -249,8 +250,8 @@
 <style>
   .app {
     display: grid;
-    grid-template-rows: var(--titlebar-h) minmax(0, 1fr) auto;
-    height: 100vh;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: 100dvh;
     background: var(--bg-titlebar);
     opacity: 0;
     transition: opacity 0.25s var(--ease);

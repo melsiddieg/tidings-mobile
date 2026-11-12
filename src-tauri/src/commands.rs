@@ -407,24 +407,37 @@ pub fn refresh_feeds(
 
 #[tauri::command]
 pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<ImportStats>> {
+    use tauri_plugin_fs::FsExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut dialog = app
+    let dialog = app
         .dialog()
         .file()
         .set_title("Import subscriptions")
         .add_filter("OPML", &["opml", "xml"]);
-    if let Some(window) = app.get_webview_window("main") {
-        dialog = dialog.set_parent(&window);
-    }
+    #[cfg(desktop)]
+    let dialog = match app.get_webview_window("main") {
+        Some(window) => dialog.set_parent(&window),
+        None => dialog,
+    };
     dialog.pick_file(move |path| {
         let _ = tx.send(path);
     });
-    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
-    let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
-    if std::fs::metadata(&path)?.len() > 20 * 1024 * 1024 {
-        return Err(Error::msg("This file is too large to be an OPML subscription list"));
-    }
-    let bytes = std::fs::read(&path)?;
+    let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
+    let bytes = match file_path.clone().into_path() {
+        Ok(path) => {
+            if std::fs::metadata(&path)?.len() > 20 * 1024 * 1024 {
+                return Err(Error::msg("This file is too large to be an OPML subscription list"));
+            }
+            std::fs::read(&path)?
+        }
+        Err(_) => {
+            let data = app.fs().read(file_path)?;
+            if data.len() > 20 * 1024 * 1024 {
+                return Err(Error::msg("This file is too large to be an OPML subscription list"));
+            }
+            data
+        }
+    };
     // Parsing is CPU work on a file from anywhere: keep it off the async threads.
     let outlines = tokio::task::spawn_blocking(move || opml::parse(&String::from_utf8_lossy(&bytes)))
         .await
@@ -436,24 +449,39 @@ pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
 
 #[tauri::command]
 pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<String>> {
+    use std::io::Write;
+    use tauri_plugin_fs::FsExt;
     let xml = opml::export(&state.db())?;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut dialog = app
+    let dialog = app
         .dialog()
         .file()
         .set_title("Export subscriptions")
         .set_file_name("tidings-subscriptions.opml")
         .add_filter("OPML", &["opml"]);
-    if let Some(window) = app.get_webview_window("main") {
-        dialog = dialog.set_parent(&window);
-    }
+    #[cfg(desktop)]
+    let dialog = match app.get_webview_window("main") {
+        Some(window) => dialog.set_parent(&window),
+        None => dialog,
+    };
     dialog.save_file(move |path| {
         let _ = tx.send(path);
     });
-    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
-    let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
-    write_private(&path, xml.as_bytes())?;
-    Ok(Some(path.display().to_string()))
+    let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
+    match file_path.clone().into_path() {
+        Ok(path) => {
+            write_private(&path, xml.as_bytes())?;
+            Ok(Some(path.display().to_string()))
+        }
+        Err(_) => {
+            let display = file_path.to_string();
+            let mut options = tauri_plugin_fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            let mut file = app.fs().open(file_path, options)?;
+            file.write_all(xml.as_bytes())?;
+            Ok(Some(display))
+        }
+    }
 }
 
 /// Writes a file only this user can read. The export lists every feed address, and
@@ -496,13 +524,25 @@ pub fn save_settings(state: AppStateRef<'_>, settings: Settings) -> Result<Setti
 
 /// Opens a link in the system browser. Only web and mail links are allowed.
 #[tauri::command]
-pub fn open_external(url: String) -> Result<()> {
+pub fn open_external(app: AppHandle, url: String) -> Result<()> {
     let parsed = url::Url::parse(url.trim()).map_err(|_| Error::msg("Invalid link"))?;
     if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
         return Err(Error::msg("Only web and email links can be opened"));
     }
-    open::that_detached(parsed.as_str())?;
-    Ok(())
+    #[cfg(target_os = "android")]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            let arg = serde_json::to_string(parsed.as_str()).map_err(|e| Error::msg(e.to_string()))?;
+            let _ = window.eval(&format!("window.TidingsAndroid?.openExternal({arg})"));
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        open::that_detached(parsed.as_str())?;
+        Ok(())
+    }
 }
 
 /// The external video player Tidings would use now, if one is found.
@@ -670,9 +710,12 @@ pub async fn search_peertube(state: AppStateRef<'_>, query: String) -> Result<Ve
 
 #[tauri::command]
 pub fn set_badge(app: AppHandle, count: i64) {
+    #[cfg(desktop)]
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_badge_count(if count > 0 { Some(count) } else { None });
     }
+    #[cfg(not(desktop))]
+    let _ = (app, count);
 }
 
 #[derive(Debug, Serialize)]

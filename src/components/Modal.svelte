@@ -92,4 +92,16 @@
     border-top: 1px solid var(--border);
     background: var(--bg-muted);
   }
+  @media (max-width: 860px) {
+    .backdrop {
+      padding: 12px;
+    }
+    .modal {
+      width: 100% !important;
+      max-height: calc(100dvh - 24px);
+    }
+    .body.padded {
+      padding: 12px 16px 16px;
+    }
+  }
 </style>

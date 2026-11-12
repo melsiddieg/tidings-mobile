@@ -99,4 +99,5 @@ export const ICONS: Record<string, string> = {
   expand: '<path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/>',
   calendar:
     '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
+  menu: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
 };

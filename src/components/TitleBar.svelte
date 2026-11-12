@@ -24,7 +24,7 @@
   }
 </script>
 
-<header class="titlebar" data-tauri-drag-region>
+<header class="titlebar" class:single-tab={store.tabs.length <= 1 && !store.progress} data-tauri-drag-region>
   <div class="tabs" role="tablist" data-tauri-drag-region {onwheel}>
     {#each store.tabs as tab (tab.id)}
       {@const active = tab.id === store.activeTabId}
@@ -37,6 +37,7 @@
         aria-selected={active}
         title={tab.kind === 'main' ? 'Feeds' : tab.title}
         onmousedown={(e) => e.button === 0 && store.activateTab(tab.id)}
+        onclick={() => store.activateTab(tab.id)}
         onauxclick={(e) => {
           if (e.button === 1) {
             e.preventDefault();
@@ -230,5 +231,19 @@
   .tab-spinner {
     width: 11px;
     height: 11px;
+  }
+  @media (max-width: 860px) {
+    .titlebar.single-tab {
+      height: 0;
+      min-height: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+    .tab-close {
+      opacity: 1;
+    }
+    .drag {
+      display: none;
+    }
   }
 </style>

@@ -5,6 +5,8 @@
 
   // Suggestions only. Nothing is contacted until the user clicks "Add".
   const STARTERS = [
+    { title: 'Jupiter Broadcasting · All Shows', url: 'https://feed.jupiter.zone/allshows', about: 'All Jupiter Broadcasting audio podcasts' },
+    { title: 'LINUX Unplugged', url: 'https://linuxunplugged.com/rss', about: 'Weekly Linux talk show by Jupiter Broadcasting' },
     { title: 'Hacker News', url: 'https://news.ycombinator.com/rss', about: 'Technology and startups' },
     { title: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', about: 'Tech, science and policy' },
     { title: 'BBC News · World', url: 'https://feeds.bbci.co.uk/news/world/rss.xml', about: 'International news' },
@@ -34,11 +36,20 @@
 </script>
 
 <div class="welcome">
+  <div class="mobile-bar">
+    <button class="icon-btn" aria-label="Subscriptions" onclick={() => (store.sidebarOpen = true)}>
+      <Icon name="menu" size={18} />
+    </button>
+    <span class="mobile-bar-title">Tidings</span>
+    <button class="icon-btn" aria-label="Settings" onclick={() => (store.dialog = { kind: 'settings' })}>
+      <Icon name="settings" size={17} />
+    </button>
+  </div>
   <div class="inner">
     <div class="hero">
       <div class="mark"><Icon name="rss" size={30} stroke={2.4} /></div>
       <h1>Welcome to Tidings</h1>
-      <p>A calm, private place for the news you follow. Your subscriptions and reading history stay on this computer.</p>
+      <p>A calm, private place for the news you follow. Your subscriptions and reading history stay on this device.</p>
       <div class="cta">
         <button class="btn primary" onclick={() => (store.dialog = { kind: 'add-feed', folderId: null })}>
           <Icon name="plus" size={15} />Add a feed
@@ -79,9 +90,23 @@
   .welcome {
     overflow-y: auto;
     min-width: 0;
+    min-height: 0;
+    height: 100%;
     background:
       radial-gradient(1200px 500px at 50% -10%, var(--accent-softer), transparent 60%),
       var(--bg-content);
+  }
+  .mobile-bar {
+    display: none;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    align-items: center;
+    justify-content: space-between;
+    height: 46px;
+    padding: 0 12px;
+    background: var(--bg-list);
+    border-bottom: 1px solid var(--border);
   }
   .inner {
     max-width: 640px;
@@ -183,5 +208,20 @@
   }
   .privacy :global(svg) {
     color: var(--success);
+  }
+  .mobile-bar-title {
+    font-weight: 700;
+    font-size: 14px;
+  }
+  @media (max-width: 860px) {
+    .mobile-bar {
+      display: flex;
+    }
+    .inner {
+      padding: 36px 20px 40px;
+    }
+    .grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 </style>

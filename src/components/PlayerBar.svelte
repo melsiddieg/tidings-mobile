@@ -273,4 +273,23 @@
   .volume {
     width: 72px;
   }
+  @media (max-width: 860px) {
+    .player {
+      height: auto;
+      padding: 8px 12px 10px;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 6px 8px;
+    }
+    .timeline {
+      grid-column: 1 / -1;
+      order: 3;
+    }
+    .volume,
+    .extras > .icon-btn:first-of-type {
+      display: none;
+    }
+    input[type='range']::-webkit-slider-thumb {
+      opacity: 1;
+    }
+  }
 </style>

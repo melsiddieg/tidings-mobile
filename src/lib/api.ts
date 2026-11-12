@@ -108,14 +108,25 @@ export const api = {
   info: () => call<AppInfo>('app_info'),
 };
 
+function customProtocolBase(): string {
+  if (
+    typeof window !== 'undefined' &&
+    (window.location.hostname === 'tauri.localhost' ||
+      document.documentElement.dataset.platform === 'android')
+  ) {
+    return 'http://tidings.localhost';
+  }
+  return 'tidings://localhost';
+}
+
 export function iconUrl(feedId: number, version: number | null): string | null {
   if (!version || !inTauri) return null;
-  return `tidings://localhost/icon/${feedId}?v=${version}`;
+  return `${customProtocolBase()}/icon/${feedId}?v=${version}`;
 }
 
 let mediaBase: string | null = null;
 
-/** Set at startup on Linux, where audio must come from the loopback server. */
+/** Set at startup on Linux and Android, where audio must come from the loopback server. */
 export function setMediaBase(base: string | null | undefined) {
   mediaBase = base ?? null;
 }
@@ -127,7 +138,7 @@ export function mediaUrl(url: string): string {
   let bin = '';
   for (const b of bytes) bin += String.fromCharCode(b);
   const b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  return mediaBase ? `${mediaBase}/media/${b64}` : `tidings://localhost/media/${b64}`;
+  return mediaBase ? `${mediaBase}/media/${b64}` : `${customProtocolBase()}/media/${b64}`;
 }
 
 export function errorText(err: unknown): string {

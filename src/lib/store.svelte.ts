@@ -140,6 +140,7 @@ class Store {
 
   dialog = $state<Dialog | null>(null);
   menu = $state<ContextMenu | null>(null);
+  sidebarOpen = $state(false);
   toasts = $state<Toast[]>([]);
   layout = $state<Layout>(local.get<Layout>('layout', { sidebar: 264, list: 390, listHeight: 330 }));
   searchFocus = $state(0);
@@ -453,7 +454,36 @@ class Store {
     local.set('scope', scope);
     this.selectedId = null;
     this.activeTabId = 'main';
+    this.sidebarOpen = false;
     this.loadArticles(false);
+  }
+
+  handleBack(): boolean {
+    if (this.menu) {
+      this.menu = null;
+      return true;
+    }
+    if (this.dialog) {
+      this.dialog = null;
+      return true;
+    }
+    if (this.sidebarOpen) {
+      this.sidebarOpen = false;
+      return true;
+    }
+    if (this.activeTabId !== 'main') {
+      this.closeTab(this.activeTabId);
+      return true;
+    }
+    if (this.selectedId !== null) {
+      this.selectedId = null;
+      return true;
+    }
+    if (this.query !== '') {
+      this.setQuery('');
+      return true;
+    }
+    return false;
   }
 
   setFilter(filter: Filter) {

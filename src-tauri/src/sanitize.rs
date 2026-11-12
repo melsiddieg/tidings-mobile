@@ -294,7 +294,11 @@ pub fn first_image(html: &str) -> Option<String> {
 }
 
 pub fn proxy_image_url(url: &str) -> String {
-    format!("tidings://localhost/img/{}", URL_SAFE_NO_PAD.encode(url))
+    #[cfg(target_os = "android")]
+    let prefix = "http://tidings.localhost/img/";
+    #[cfg(not(target_os = "android"))]
+    let prefix = "tidings://localhost/img/";
+    format!("{prefix}{}", URL_SAFE_NO_PAD.encode(url))
 }
 
 pub struct Rendered {

@@ -95,6 +95,15 @@
 <header class="list-head">
   <div class="title-row">
     <div class="scope">
+      <button
+        class="icon-btn mobile-menu-btn"
+        title="Subscriptions"
+        aria-label="Subscriptions"
+        onclick={() => (store.sidebarOpen = !store.sidebarOpen)}
+      >
+        <Icon name="menu" size={18} />
+        {#if store.unreadTotal > 0}<span class="menu-dot"></span>{/if}
+      </button>
       {#if feed}
         <FeedIcon {feed} size={18} />
       {:else}
@@ -344,5 +353,24 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .mobile-menu-btn {
+    display: none;
+    position: relative;
+    margin-left: -4px;
+  }
+  .menu-dot {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  @media (max-width: 860px) {
+    .mobile-menu-btn {
+      display: inline-grid;
+    }
   }
 </style>

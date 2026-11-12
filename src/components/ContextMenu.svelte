@@ -19,15 +19,17 @@
 
   onMount(() => {
     const close = (e: Event) => {
-      if (e.type === 'mousedown' && el?.contains(e.target as Node)) return;
+      if ((e.type === 'mousedown' || e.type === 'touchstart') && el?.contains(e.target as Node)) return;
       store.menu = null;
     };
     window.addEventListener('mousedown', close, true);
+    window.addEventListener('touchstart', close, true);
     window.addEventListener('blur', close);
     window.addEventListener('resize', close);
     window.addEventListener('wheel', close, { passive: true });
     return () => {
       window.removeEventListener('mousedown', close, true);
+      window.removeEventListener('touchstart', close, true);
       window.removeEventListener('blur', close);
       window.removeEventListener('resize', close);
       window.removeEventListener('wheel', close);
@@ -144,5 +146,11 @@
     height: 1px;
     margin: 4px 8px;
     background: var(--border);
+  }
+  @media (max-width: 860px) {
+    .item {
+      height: 36px;
+      font-size: 14px;
+    }
   }
 </style>

@@ -39,11 +39,18 @@
 
 <div
   class="workspace"
+  class:sidebar-open={store.sidebarOpen}
+  class:article-open={store.selectedId != null}
   style:--sidebar-w="{store.layout.sidebar}px"
   style:--list-w="{store.layout.list}px"
   style:--list-h="{store.layout.listHeight}px"
 >
-  <Sidebar />
+  {#if store.sidebarOpen}
+    <div class="mobile-scrim" role="presentation" onclick={() => (store.sidebarOpen = false)}></div>
+  {/if}
+  <div class="sidebar-drawer">
+    <Sidebar />
+  </div>
   <div class="resizer x" role="separator" aria-orientation="vertical" onpointerdown={resize('sidebar', 'x', 200, 420)}></div>
 
   {#if empty}
@@ -80,6 +87,15 @@
     display: grid;
     grid-template-columns: var(--sidebar-w) 0 minmax(0, 1fr);
     height: 100%;
+  }
+  .sidebar-drawer {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+  }
+  .mobile-scrim {
+    display: none;
   }
   .reading {
     display: grid;
@@ -159,5 +175,49 @@
     display: flex;
     align-items: center;
     gap: 4px;
+  }
+  @media (max-width: 860px) {
+    .workspace {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr);
+      position: relative;
+    }
+    .resizer {
+      display: none;
+    }
+    .mobile-scrim {
+      display: block;
+      position: fixed;
+      inset: 0;
+      z-index: 490;
+      background: var(--scrim);
+      -webkit-backdrop-filter: blur(2px);
+      backdrop-filter: blur(2px);
+    }
+    .sidebar-drawer {
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: min(304px, 84vw);
+      z-index: 500;
+      transform: translateX(-104%);
+      transition: transform 0.22s var(--ease-out);
+      box-shadow: var(--shadow-lg);
+    }
+    .workspace.sidebar-open .sidebar-drawer {
+      transform: translateX(0);
+    }
+    .reading.widescreen,
+    .reading.normal {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr);
+    }
+    .workspace:not(.article-open) .preview {
+      display: none;
+    }
+    .workspace.article-open .reading > :global(.list-pane) {
+      display: none;
+    }
   }
 </style>

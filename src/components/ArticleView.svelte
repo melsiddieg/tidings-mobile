@@ -168,6 +168,16 @@
   {#if detail}
     <div class="article-toolbar">
       <div class="group">
+        {#if mode === 'preview'}
+          <button
+            class="icon-btn mobile-back-btn"
+            title="Back to articles"
+            aria-label="Back to articles"
+            onclick={() => (store.selectedId = null)}
+          >
+            <Icon name="arrow-left" size={18} />
+          </button>
+        {/if}
         <button class="icon-btn" class:active={starred} title={starred ? 'Remove star (S)' : 'Star (S)'} onclick={() => detail && store.setStarred(detail.id, !starred)}>
           <Icon name="star" size={16} fill={starred} />
         </button>
@@ -293,8 +303,26 @@
       </article>
     </div>
   {:else if loading}
+    <div class="article-toolbar">
+      <div class="group">
+        {#if mode === 'preview'}
+          <button class="icon-btn mobile-back-btn" aria-label="Back to articles" onclick={() => (store.selectedId = null)}>
+            <Icon name="arrow-left" size={18} />
+          </button>
+        {/if}
+      </div>
+    </div>
     <div class="article-state"><span class="spinner"></span></div>
   {:else if error}
+    <div class="article-toolbar">
+      <div class="group">
+        {#if mode === 'preview'}
+          <button class="icon-btn mobile-back-btn" aria-label="Back to articles" onclick={() => (store.selectedId = null)}>
+            <Icon name="arrow-left" size={18} />
+          </button>
+        {/if}
+      </div>
+    </div>
     <div class="article-state">
       <Icon name="alert" size={22} />
       <p>{error}</p>

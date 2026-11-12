@@ -79,6 +79,9 @@
         <Icon name="plus" size={17} />
       </button>
       <button class="icon-btn" title="More" onclick={moreMenu}><Icon name="more" size={17} /></button>
+      <button class="icon-btn mobile-close-btn" title="Close" aria-label="Close subscriptions" onclick={() => (store.sidebarOpen = false)}>
+        <Icon name="x" size={17} />
+      </button>
     </div>
   </div>
 
@@ -395,5 +398,16 @@
     height: 7px;
     border-radius: 50%;
     background: var(--accent);
+  }
+  .mobile-close-btn {
+    display: none;
+  }
+  @media (max-width: 860px) {
+    .mobile-close-btn {
+      display: inline-grid;
+    }
+    .icon-btn.mini {
+      opacity: 0.75;
+    }
   }
 </style>
