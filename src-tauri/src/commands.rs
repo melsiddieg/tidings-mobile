@@ -412,8 +412,9 @@ pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
     let dialog = app
         .dialog()
         .file()
-        .set_title("Import subscriptions")
-        .add_filter("OPML", &["opml", "xml"]);
+        .set_title("Import subscriptions");
+    #[cfg(desktop)]
+    let dialog = dialog.add_filter("OPML", &["opml", "xml"]);
     #[cfg(desktop)]
     let dialog = match app.get_webview_window("main") {
         Some(window) => dialog.set_parent(&window),
@@ -457,8 +458,11 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
         .dialog()
         .file()
         .set_title("Export subscriptions")
-        .set_file_name("tidings-subscriptions.opml")
-        .add_filter("OPML", &["opml"]);
+        .set_file_name("tidings-subscriptions.opml");
+    #[cfg(desktop)]
+    let dialog = dialog.add_filter("OPML", &["opml"]);
+    #[cfg(target_os = "android")]
+    let dialog = dialog.add_filter("OPML", &["text/xml"]);
     #[cfg(desktop)]
     let dialog = match app.get_webview_window("main") {
         Some(window) => dialog.set_parent(&window),
