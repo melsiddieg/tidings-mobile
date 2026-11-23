@@ -10,12 +10,21 @@ import type {
   FeedPatch,
   FeedType,
   ItemRef,
+  ImportLayout,
+  ImportPreview,
   ImportStats,
   ListQuery,
   PeerTubeHit,
   PeerTubeVideo,
   AudioStream,
+  BackupSummary,
+  RestoreResult,
   Brief,
+  Translation,
+  TranslateLang,
+  Rule,
+  FeedActivity,
+  SavedSearch,
   BriefInfo,
   ComponentCheck,
   ReaderPage,
@@ -68,6 +77,8 @@ export const api = {
   addFeed: (url: string, folderId: number | null, title?: string, allowLocal = false) =>
     call<number>('add_feed', { url, folderId, title, allowLocal }),
   updateFeed: (id: number, patch: FeedPatch) => call<void>('update_feed', { id, patch }),
+  /** `feedType` null: back to the detected type. */
+  setFeedType: (ids: number[], feedType: FeedType | null) => call<number>('set_feed_type', { ids, feedType }),
   deleteFeed: (id: number) => call<void>('delete_feed', { id }),
   moveFeed: (id: number, folderId: number | null, before: ItemRef | null) =>
     call<void>('move_feed', { id, folderId, before }),
@@ -86,8 +97,17 @@ export const api = {
   deleteAllSubscriptions: () => call<void>('delete_all_subscriptions'),
   refresh: (opts: { feedIds?: number[]; folderId?: number } = {}) =>
     call<number>('refresh_feeds', { feedIds: opts.feedIds ?? null, folderId: opts.folderId ?? null }),
-  importOpml: () => call<ImportStats | null>('import_opml'),
+  /** Opens a file dialog; what importing the chosen file would do. `importOpml` then imports it. */
+  previewOpml: () => call<ImportPreview | null>('preview_opml'),
+  importOpml: (layout: ImportLayout) => call<ImportStats>('import_opml', { layout }),
+  cancelOpmlImport: () => call<void>('cancel_opml_import'),
   exportOpml: () => call<string | null>('export_opml'),
+  backup: () => call<string | null>('backup'),
+  /** Opens a file dialog; the summary of the chosen backup, which `restoreBackup` then restores. */
+  chooseBackup: () => call<BackupSummary | null>('choose_backup'),
+  restoreBackup: () => call<RestoreResult>('restore_backup'),
+  exportStarred: (format: 'html' | 'markdown', images: boolean) =>
+    call<string | null>('export_starred', { format, images }),
   settings: () => call<Settings>('get_settings'),
   saveSettings: (settings: Settings) => call<Settings>('save_settings', { settings }),
   openExternal: (url: string) => call<void>('open_external', { url }),
@@ -100,6 +120,21 @@ export const api = {
   briefs: () => call<BriefInfo[]>('briefs'),
   brief: (id: number) => call<Brief | null>('brief', { id }),
   deleteBrief: (id: number) => call<void>('delete_brief', { id }),
+  /** `lang` null: the usual language from the settings. */
+  translate: (id: number, fullText: boolean, again = false, lang: TranslateLang | null = null) =>
+    call<Translation>('translate_article', { id, fullText, again, lang }),
+  stopTranslation: () => call<void>('stop_translation'),
+  feedActivity: () => call<FeedActivity[]>('feed_activity'),
+  countArticles: (query: ListQuery) => call<number>('count_articles', { query }),
+  searches: () => call<SavedSearch[]>('list_searches'),
+  saveSearch: (title: string, search: string) => call<SavedSearch>('save_search', { title, search }),
+  renameSearch: (id: number, title: string) => call<void>('rename_search', { id, title }),
+  deleteSearch: (id: number) => call<void>('delete_search', { id }),
+  rules: () => call<Rule[]>('list_rules'),
+  saveRule: (rule: Rule) => call<Rule>('save_rule', { rule }),
+  deleteRule: (id: number) => call<void>('delete_rule', { id }),
+  countRuleMatches: (rule: Rule) => call<number>('count_rule_matches', { rule }),
+  applyRule: (id: number) => call<number>('apply_rule', { id }),
   /** `run`: may start `yt-dlp --version`. Not at startup. */
   checkComponents: (run: boolean) => call<ComponentCheck[]>('check_components', { run }),
   checkComponentsOnline: () => call<ComponentCheck[]>('check_components_online'),

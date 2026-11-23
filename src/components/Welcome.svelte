@@ -51,7 +51,7 @@
       <h1>Welcome to Tidings</h1>
       <p>A calm, private place for the news you follow. Your subscriptions and reading history stay on this device.</p>
       <div class="cta">
-        <button class="btn primary" onclick={() => (store.dialog = { kind: 'add-feed', folderId: null })}>
+        <button class="btn primary" onclick={() => store.addFeed(null)}>
           <Icon name="plus" size={15} />Add a feed
         </button>
         <button class="btn" onclick={() => store.importOpml()}>

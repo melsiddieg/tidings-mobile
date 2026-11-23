@@ -83,23 +83,24 @@ pub struct SourceRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Ollama,
     OpenAi,
 }
 
-/// The model server and model to use, from the settings.
-struct Server {
-    kind: Kind,
-    base: Url,
-    model: String,
+/// The model server and model to use, from the settings. Translations
+/// (`translate.rs`) use the same server, with their own model if one is set.
+pub(crate) struct Server {
+    pub kind: Kind,
+    pub base: Url,
+    pub model: String,
 }
 
-fn server(settings: &Settings) -> Result<Server> {
+pub(crate) fn server(settings: &Settings) -> Result<Server> {
     let kind = match settings.ai_provider.as_str() {
         "ollama" => Kind::Ollama,
         "openai" => Kind::OpenAi,
-        _ => return Err(Error::msg("Briefs are off. Choose a local model in Settings → AI briefs.")),
+        _ => return Err(Error::msg("Local AI is off. Choose a local model in Settings → Local AI.")),
     };
     let base = settings.ai_server().ok_or_else(|| Error::msg("The model server address is not valid"))?;
     Ok(Server { kind, base, model: settings.ai_model.clone() })
@@ -166,7 +167,7 @@ impl Drop for Busy {
 pub async fn write(net: &Net, settings: &Settings, title: &str, sources: &[BriefSource], total: usize) -> Result<(Body, String)> {
     let server = server(settings)?;
     if server.model.is_empty() {
-        return Err(Error::msg("Choose a model for briefs in Settings → AI briefs."));
+        return Err(Error::msg("Choose a model for briefs in Settings → Local AI."));
     }
     if sources.is_empty() {
         return Err(Error::msg("There are no articles to brief here."));
@@ -293,6 +294,16 @@ fn when(published: i64) -> String {
     Local.timestamp_opt(published, 0).single().map(|t| t.format("%b %-d, %H:%M").to_string()).unwrap_or_default()
 }
 
+/// For OpenAI-style servers: asks a model that thinks before it answers (Qwen3,
+/// Qwen3.5 and others) to answer at once. Servers that run the model's chat template
+/// (llama.cpp, vLLM) pass it to the template; others ignore it. Thinking is slow, and
+/// it can use up the answer's token limit before the answer starts.
+pub(crate) const NO_THINKING: &str = "chat_template_kwargs";
+
+pub(crate) fn no_thinking() -> Value {
+    json!({"enable_thinking": false})
+}
+
 /// Asks the model and returns its answer text.
 async fn complete(net: &Net, server: &Server, system: &str, user: &str) -> Result<String> {
     let messages = json!([{"role": "system", "content": system}, {"role": "user", "content": user}]);
@@ -312,19 +323,23 @@ async fn complete(net: &Net, server: &Server, system: &str, user: &str) -> Resul
             text_at(&json, &["message", "content"])
         }
         Kind::OpenAi => {
-            let body = json!({
+            let mut body = json!({
                 "model": server.model,
                 "messages": messages,
                 "stream": false,
                 "temperature": 0.2,
                 "response_format": {"type": "json_schema", "json_schema": {"name": "brief", "strict": true, "schema": schema()}}
             });
-            // Some servers do not take a schema; ask again without it.
+            body[NO_THINKING] = no_thinking();
+            // Some servers do not take a schema or the template setting; ask again without them.
             let json = match post(net, server, "chat/completions", &body).await {
                 Ok(json) => json,
                 Err(_) => {
                     let mut plain = body.clone();
-                    plain.as_object_mut().map(|o| o.remove("response_format"));
+                    plain.as_object_mut().map(|o| {
+                        o.remove("response_format");
+                        o.remove(NO_THINKING)
+                    });
                     post(net, server, "chat/completions", &plain).await?
                 }
             };
@@ -333,7 +348,7 @@ async fn complete(net: &Net, server: &Server, system: &str, user: &str) -> Resul
     }
 }
 
-async fn post(net: &Net, server: &Server, path: &str, body: &Value) -> Result<Value> {
+pub(crate) async fn post(net: &Net, server: &Server, path: &str, body: &Value) -> Result<Value> {
     let url = endpoint(server, path)?;
     let request = net
         .local_model(Method::POST, &url)?
@@ -387,7 +402,7 @@ async fn send(request: reqwest::RequestBuilder, server: &Server) -> Result<Value
     Ok(json)
 }
 
-fn text_at(json: &Value, path: &[&str]) -> Result<String> {
+pub(crate) fn text_at(json: &Value, path: &[&str]) -> Result<String> {
     let mut at = json;
     for key in path {
         at = match key.parse::<usize>() {

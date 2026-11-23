@@ -49,15 +49,29 @@ pub fn random_token() -> std::io::Result<String> {
 /// Starts the server and returns its base URL, `http://127.0.0.1:PORT/TOKEN`.
 /// Media URLs are `BASE/media/<base64url>`.
 pub async fn start(handler: Handler) -> std::io::Result<String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    // A tokio socket belongs to the runtime it is created in, and fails once that
+    // runtime ends. So the socket is made here but handed to tokio inside the
+    // task that serves it, on the runtime that runs that task.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = random_token()?;
     let base = format!("http://127.0.0.1:{port}/{token}");
     let prefix = format!("/{token}/media/");
     let waiting = Arc::new(Semaphore::new(MAX_WAITING));
     tauri::async_runtime::spawn(async move {
+        let Ok(listener) = TcpListener::from_std(listener) else { return };
         loop {
-            let Ok((stream, _)) = listener.accept().await else { continue };
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                // Too many open files, for example. Wait before trying again: an
+                // error comes back at once, and a loop that never waits would
+                // keep a thread of the runtime busy for good.
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             // Too many connections that have sent nothing useful: drop this one.
             let Ok(permit) = waiting.clone().try_acquire_owned() else { continue };
             let (handler, prefix) = (handler.clone(), prefix.clone());
@@ -165,7 +179,10 @@ fn stream_plan(first: &Response<Vec<u8>>, range: Option<&str>) -> Option<StreamP
     let last = wanted_end.unwrap_or(u64::MAX).min(total.checked_sub(1)?);
     let consistent = first_end >= start && first_end - start + 1 == first.body().len() as u64;
     let whole = range.is_none();
-    (consistent && first_end < last && (!whole || start == 0)).then_some(StreamPlan { whole, start, first_end, last, total })
+    // A request without `Range` gets a `200` also when the first slice already
+    // holds the whole file: `206` is not a valid answer to it.
+    let more = first_end < last || (whole && first_end == last);
+    (consistent && more && (!whole || start == 0)).then_some(StreamPlan { whole, start, first_end, last, total })
 }
 
 fn head_text<'a>(
@@ -307,6 +324,62 @@ mod tests {
         let r = client.head(&url).send().await.unwrap();
         assert_eq!(r.status().as_u16(), 200);
         assert_eq!(r.headers()["content-length"], "100");
+    }
+
+    /// A file smaller than one slice: the media proxy answers `206` with all of
+    /// it, also to a request without `Range`.
+    #[tokio::test]
+    async fn small_file_without_range_is_a_200() {
+        let small: Handler = Arc::new(|_encoded: String, range: Option<String>| {
+            Box::pin(async move {
+                let (start, _) = crate::media::parse_range(range.as_deref());
+                Response::builder()
+                    .status(206)
+                    .header(header::CONTENT_TYPE, "audio/mpeg")
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-6/7"))
+                    .body(b"ID3\x04abc"[start as usize..].to_vec())
+                    .unwrap()
+            })
+        });
+        let base = start(small).await.unwrap();
+        let url = format!("{base}/media/abc");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let r = client.get(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-type"], "audio/mpeg");
+        assert_eq!(r.headers()["content-length"], "7");
+        assert!(r.headers().get("content-range").is_none());
+        assert_eq!(r.bytes().await.unwrap().to_vec(), b"ID3\x04abc");
+
+        let r = client.head(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-length"], "7");
+
+        // With a Range the answer stays a 206.
+        let r = client.get(&url).header("Range", "bytes=2-").send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 206);
+        assert_eq!(r.headers()["content-range"], "bytes 2-6/7");
+        assert_eq!(r.bytes().await.unwrap().to_vec(), b"3\x04abc");
+    }
+
+    /// The tests start each server from their own runtime, which ends with the
+    /// test. The 0.9.6 build hung on macOS: the socket belonged to such a runtime,
+    /// its accept loop then failed without pause and kept one of the 3 threads of
+    /// the shared runtime busy, and after three tests no thread was left.
+    #[tokio::test]
+    async fn server_outlives_the_runtime_that_started_it() {
+        let base = std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(start(sliced_handler())).unwrap()
+        })
+        .join()
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = client.get(format!("{base}/media/abc")).header("Range", "bytes=0-4").send();
+        let r = tokio::time::timeout(Duration::from_secs(10), request).await.expect("the server did not answer").unwrap();
+        assert_eq!(r.status().as_u16(), 206);
+        assert_eq!(r.bytes().await.unwrap().to_vec(), file()[..5]);
     }
 
     #[tokio::test]

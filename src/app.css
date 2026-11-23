@@ -766,6 +766,28 @@ kbd {
 .tree-row.paused .row-label {
   color: var(--text-3);
 }
+/* "Add a feed to this folder", shown while the pointer is on the row. */
+.tree-row .row-add {
+  display: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -4px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  flex: none;
+}
+.tree-row:hover .row-add,
+.tree-row .row-add:focus-visible {
+  display: grid;
+}
+.tree-row .row-add:hover {
+  background: var(--bg-press);
+  color: var(--text);
+}
 .tree-row .row-count {
   font-size: 11.5px;
   font-weight: 600;
@@ -996,6 +1018,18 @@ kbd {
   color: var(--text-3);
   background: var(--bg-muted);
 }
+.translation-note {
+  flex-wrap: wrap;
+  border-radius: 10px;
+}
+.translation-note .link {
+  font-size: inherit;
+}
+.original-title {
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: 14px;
+}
 .no-content {
   color: var(--text-3);
   font-size: 14px;
@@ -1069,6 +1103,26 @@ kbd {
 @media (max-width: 860px) {
   .mobile-back-btn {
     display: inline-grid;
+  }
+  .article-toolbar {
+    padding: 0 8px;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .article-toolbar::-webkit-scrollbar {
+    display: none;
+  }
+  .article-toolbar .group {
+    flex-shrink: 0;
+  }
+  .article-toolbar .sep {
+    display: none;
+  }
+  .article-toolbar .tool {
+    padding: 0 8px;
+    font-size: 12px;
+    flex-shrink: 0;
   }
   .article {
     padding: 24px 18px 64px;

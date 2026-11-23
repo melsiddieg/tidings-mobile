@@ -6,16 +6,21 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::backup;
 use crate::brief;
 use crate::db::{self, ArticleItem, ArticleRow, Counts, FeedPatch, Item, ListQuery, Scope, Tree};
 use crate::discover::{self, Candidate};
 use crate::error::{Error, Result};
+use crate::export;
 use crate::feeds;
+use crate::files;
 use crate::net;
-use crate::opml::{self, ImportStats};
+use crate::opml::{self, ImportPreview, ImportStats, Layout};
 use crate::peertube;
 use crate::reader;
+use crate::rules::Rule;
 use crate::sanitize;
+use crate::translate;
 use crate::settings::Settings;
 use crate::state::AppState;
 use crate::updates;
@@ -41,12 +46,31 @@ pub struct ArticleDetail {
     pub has_full_text: bool,
     pub enclosure_url: Option<String>,
     pub enclosure_type: Option<String>,
+    /// The article is mostly Chinese.
+    pub chinese: bool,
+    /// "zh" (Chinese), "ar" (Arabic) or "" (another language): the UI offers the
+    /// translations that fit it and `Settings::translate_to`.
+    pub language: &'static str,
+    /// For an article the UI offers to translate, in the article view: where its
+    /// translated paragraphs and its images go (`translate::layout`). Empty otherwise.
+    pub translation_layout: Vec<translate::Block>,
 }
 
-fn detail(row: ArticleRow, load_images: bool, full_text: bool) -> ArticleDetail {
+/// `translate_to`: the usual translation language, with `Some` when the article
+/// view asks, so `translation_layout` is filled for an article it can translate:
+/// with Arabic, every article; with English, Chinese and Arabic ones.
+fn detail(row: ArticleRow, load_images: bool, full_text: bool, translate_to: Option<translate::Lang>) -> ArticleDetail {
     let use_full = full_text && row.full_content.is_some();
     let source = if use_full { row.full_content.as_deref() } else { row.content.as_deref() };
     let rendered = sanitize::render(source.unwrap_or(""), load_images);
+    let text = sanitize::plain_text(&rendered.html);
+    let language = translate::language(&format!("{} {}", row.title, text.chars().take(2_000).collect::<String>()));
+    let translatable = match translate_to {
+        Some(translate::Lang::Arabic) => true,
+        Some(translate::Lang::English) => !language.is_empty(),
+        None => false,
+    };
+    let translation_layout = if translatable { translate::layout(source.unwrap_or(""), load_images) } else { Vec::new() };
     ArticleDetail {
         id: row.id,
         feed_id: row.feed_id,
@@ -63,7 +87,15 @@ fn detail(row: ArticleRow, load_images: bool, full_text: bool) -> ArticleDetail 
         has_full_text: row.full_content.is_some(),
         enclosure_url: row.enclosure_url,
         enclosure_type: row.enclosure_type,
+        chinese: language == "zh",
+        language,
+        translation_layout,
     }
+}
+
+/// The language articles are usually translated into.
+fn translate_to(settings: &crate::settings::Settings) -> translate::Lang {
+    translate::Lang::from_code(&settings.translate_to).unwrap_or_default()
 }
 
 fn spawn_refresh(app: &AppHandle, state: &Arc<AppState>, ids: Vec<i64>) {
@@ -95,7 +127,9 @@ pub fn list_articles(state: AppStateRef<'_>, query: ListQuery) -> Result<Vec<Art
     })
 }
 
-#[tauri::command]
+// Commands that show article HTML run on the async runtime, not on the main
+// thread: a long article must not stop the window while it is cleaned.
+#[tauri::command(async)]
 pub fn list_articles_full(
     state: AppStateRef<'_>,
     query: ListQuery,
@@ -105,20 +139,20 @@ pub fn list_articles_full(
     let conn = state.db();
     let ids = db::list_article_ids(&conn, &query)?;
     ids.into_iter()
-        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false)))
+        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false, None)))
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_article(
     state: AppStateRef<'_>,
     id: i64,
     load_images: Option<bool>,
     full_text: Option<bool>,
 ) -> Result<ArticleDetail> {
-    let load = load_images.unwrap_or(state.settings().load_images);
+    let settings = state.settings();
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load, full_text.unwrap_or(false)))
+    Ok(detail(row, load_images.unwrap_or(settings.load_images), full_text.unwrap_or(false), Some(translate_to(&settings))))
 }
 
 /// Downloads the linked web page and extracts the full article (reader mode).
@@ -129,6 +163,7 @@ pub async fn fetch_full_text(
     load_images: Option<bool>,
 ) -> Result<ArticleDetail> {
     let settings = state.settings();
+    let generation = state.generation();
     let row = db::article(&state.db(), id)?;
     if row.full_content.is_none() {
         let url = row.url.clone().ok_or_else(|| Error::msg("This article has no link"))?;
@@ -138,11 +173,14 @@ pub async fn fetch_full_text(
         let feed_url = url::Url::parse(&info.url).ok().filter(|_| info.local);
         let extracted =
             reader::extract_url(&state.net(), &url, feed_url.as_ref(), settings.strip_tracking).await?;
-        db::save_full_content(&state.db(), id, &extracted.html)?;
+        db::save_full_content(&*state.db_since(generation)?, id, &extracted.html)?;
     }
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load_images.unwrap_or(settings.load_images), true))
+    Ok(detail(row, load_images.unwrap_or(settings.load_images), true, Some(translate_to(&settings))))
 }
+
+/// Reader pages kept in memory hold at most this much HTML together.
+const PAGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,7 +219,12 @@ pub async fn read_url(
             // feed there: any feed could otherwise link to that host. Local pages
             // open in the browser.
             let page = Arc::new(reader::extract_url(&state.net(), &key, None, settings.strip_tracking).await?);
-            state.pages.lock().unwrap_or_else(|e| e.into_inner()).put(key, page.clone());
+            let mut pages = state.pages.lock().unwrap_or_else(|e| e.into_inner());
+            pages.put(key, page.clone());
+            // The cache holds up to 40 pages, and at most `PAGE_CACHE_BYTES` of HTML.
+            while pages.len() > 1 && pages.iter().map(|(_, p)| p.html.len()).sum::<usize>() > PAGE_CACHE_BYTES {
+                pages.pop_lru();
+            }
             page
         }
     };
@@ -309,6 +352,12 @@ pub fn move_feed(
     db::move_feed(&state.db(), id, folder_id, before)
 }
 
+/// Sets the type of feeds by hand (`feed_type` None: back to the detected type).
+#[tauri::command]
+pub fn set_feed_type(state: AppStateRef<'_>, ids: Vec<i64>, feed_type: Option<String>) -> Result<usize> {
+    db::set_feed_type(&state.db(), &ids, feed_type.as_deref())
+}
+
 /// Adds a feed or folder to Favorites, or removes it.
 #[tauri::command]
 pub fn set_pinned(state: AppStateRef<'_>, item: Item, pinned: bool) -> Result<()> {
@@ -405,8 +454,47 @@ pub fn refresh_feeds(
 // OPML
 // ---------------------------------------------------------------------------
 
+fn display_file_name(file_path: &tauri_plugin_dialog::FilePath, fallback: &str) -> String {
+    if let Ok(path) = file_path.clone().into_path() {
+        if let Some(name) = path.file_name() {
+            let name = name.to_string_lossy().into_owned();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    let raw = file_path.to_string();
+    let last = raw.rsplit(['/', ':']).next().unwrap_or("").trim();
+    if last.is_empty() {
+        fallback.to_string()
+    } else {
+        // Basic percent-decoding for Android content:// display segments (e.g. %20, %3A).
+        let bytes = last.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                    if let Ok(b) = u8::from_str_radix(hex, 16) {
+                        out.push(b);
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        let decoded = String::from_utf8_lossy(&out);
+        let segment = decoded.rsplit(['/', ':']).next().unwrap_or("").trim();
+        if segment.is_empty() { fallback.to_string() } else { segment.to_string() }
+    }
+}
+
+/// Reads an OPML file the user picks and compares it with the subscriptions. The
+/// feeds are kept for `import_opml`, which adds them.
 #[tauri::command]
-pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<ImportStats>> {
+pub async fn preview_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<ImportPreview>> {
     use tauri_plugin_fs::FsExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let dialog = app
@@ -424,6 +512,7 @@ pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
         let _ = tx.send(path);
     });
     let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
+    let name = display_file_name(&file_path, "subscriptions.opml");
     let bytes = match file_path.clone().into_path() {
         Ok(path) => {
             if std::fs::metadata(&path)?.len() > 20 * 1024 * 1024 {
@@ -440,12 +529,35 @@ pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
         }
     };
     // Parsing is CPU work on a file from anywhere: keep it off the async threads.
-    let outlines = tokio::task::spawn_blocking(move || opml::parse(&String::from_utf8_lossy(&bytes)))
-        .await
-        .map_err(|e| Error::msg(e.to_string()))??;
-    let stats = opml::import(&state.db(), &outlines)?;
+    let pending = tokio::task::spawn_blocking(move || -> Result<opml::Pending> {
+        Ok(opml::feeds_in(&opml::parse(&String::from_utf8_lossy(&bytes))?))
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))??;
+    let preview = opml::preview(&state.db(), &pending, &name)?;
+    *state.opml_import.lock().unwrap_or_else(|e| e.into_inner()) = Some(pending);
+    Ok(Some(preview))
+}
+
+/// Adds the new feeds of the file `preview_opml` read. `layout` says whether
+/// subscribed feeds move to the file's folders.
+#[tauri::command]
+pub fn import_opml(app: AppHandle, state: AppStateRef<'_>, layout: Layout) -> Result<ImportStats> {
+    let pending = state
+        .opml_import
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or_else(|| Error::msg("Choose the OPML file again"))?;
+    let stats = opml::apply(&state.db(), &pending, layout)?;
     spawn_refresh(&app, state.inner(), stats.new_feed_ids.clone());
-    Ok(Some(stats))
+    Ok(stats)
+}
+
+/// Forgets the file `preview_opml` read, when the user cancels.
+#[tauri::command]
+pub fn cancel_opml_import(state: AppStateRef<'_>) {
+    *state.opml_import.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[tauri::command]
@@ -474,11 +586,11 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
     let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
     match file_path.clone().into_path() {
         Ok(path) => {
-            write_private(&path, xml.as_bytes())?;
+            files::write_private(&path, xml.as_bytes())?;
             Ok(Some(path.display().to_string()))
         }
         Err(_) => {
-            let display = file_path.to_string();
+            let display = display_file_name(&file_path, "tidings-subscriptions.opml");
             let mut options = tauri_plugin_fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
             let mut file = app.fs().open(file_path, options)?;
@@ -488,26 +600,245 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
     }
 }
 
-/// Writes a file only this user can read. The export lists every feed address, and
-/// an address can hold a password.
-pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+// ---------------------------------------------------------------------------
+// Backup and restore (backup.rs), starred articles (export.rs)
+// ---------------------------------------------------------------------------
+
+const RESTORE_STAGE_FILE: &str = ".tidings-restore-stage.db";
+
+fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Copies the whole database to a file the user picks.
+#[tauri::command]
+pub async fn backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<String>> {
     use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    use tauri_plugin_fs::FsExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let filename = format!("tidings-backup-{}.tidings", today());
+    let dialog = app
+        .dialog()
+        .file()
+        .set_title("Back up Tidings")
+        .set_file_name(&filename);
+    #[cfg(desktop)]
+    let dialog = dialog.add_filter("Tidings backup", &["tidings"]);
+    #[cfg(target_os = "android")]
+    let dialog = dialog.add_filter("Tidings backup", &["application/octet-stream"]);
+    #[cfg(desktop)]
+    let dialog = match app.get_webview_window("main") {
+        Some(window) => dialog.set_parent(&window),
+        None => dialog,
+    };
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
+    let source = state.db_path();
+    match file_path.clone().into_path() {
+        Ok(path) => {
+            let target = path.clone();
+            // A second, read-only connection: the app keeps working while the copy is made.
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let conn = rusqlite::Connection::open_with_flags(
+                    &source,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                backup::copy_to(&conn, &target)
+            })
+            .await
+            .map_err(|e| Error::msg(e.to_string()))??;
+            Ok(Some(path.display().to_string()))
+        }
+        Err(_) => {
+            let display = display_file_name(&file_path, &filename);
+            let temp_target = state.data_dir.join(".tidings-backup-export.db");
+            let temp_for_copy = temp_target.clone();
+            let copy_res = tokio::task::spawn_blocking(move || -> Result<()> {
+                let conn = rusqlite::Connection::open_with_flags(
+                    &source,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                backup::copy_to(&conn, &temp_for_copy)
+            })
+            .await
+            .map_err(|e| Error::msg(e.to_string()))?;
+            if let Err(err) = copy_res {
+                let _ = std::fs::remove_file(&temp_target);
+                return Err(err);
+            }
+            let write_res = (|| -> Result<()> {
+                let mut src = std::fs::File::open(&temp_target)?;
+                let mut options = tauri_plugin_fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                let mut dst = app.fs().open(file_path, options)?;
+                std::io::copy(&mut src, &mut dst)?;
+                dst.flush()?;
+                Ok(())
+            })();
+            let _ = std::fs::remove_file(&temp_target);
+            write_res?;
+            Ok(Some(display))
+        }
     }
-    let mut file = options.open(path)?;
-    // An existing file keeps its old mode: tighten it too.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+}
+
+/// Lets the user pick a backup, checks it and says what restoring it would do.
+/// `restore_backup` then restores that file.
+#[tauri::command]
+pub async fn choose_backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<backup::Summary>> {
+    use tauri_plugin_fs::FsExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let dialog = app
+        .dialog()
+        .file()
+        .set_title("Restore a backup");
+    #[cfg(desktop)]
+    let dialog = dialog.add_filter("Tidings backup", &["tidings", "db"]);
+    #[cfg(desktop)]
+    let dialog = match app.get_webview_window("main") {
+        Some(window) => dialog.set_parent(&window),
+        None => dialog,
+    };
+    dialog.pick_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
+    let display_name = display_file_name(&file_path, "backup.tidings");
+    let (path, is_staged) = match file_path.clone().into_path() {
+        Ok(path) => (path, false),
+        Err(_) => {
+            let staged = state.data_dir.join(RESTORE_STAGE_FILE);
+            let mut src = app.fs().open(file_path, tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
+            let (temp, mut dst) = files::private_temp(&staged)?;
+            let copy = std::io::copy(&mut src, &mut dst)
+                .and_then(|_| dst.sync_all())
+                .and_then(|()| std::fs::rename(&temp, &staged));
+            if let Err(err) = copy {
+                let _ = std::fs::remove_file(&temp);
+                return Err(err.into());
+            }
+            (staged, true)
+        }
+    };
+    let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same(&path, &state.db_path()) {
+        return Err(Error::msg("This is the database Tidings uses now. Choose a backup."));
     }
-    file.write_all(bytes)?;
-    Ok(())
+    let current = state.settings();
+    let file = path.clone();
+    let mut summary = tokio::task::spawn_blocking(move || backup::inspect(&file, &current))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))??;
+    if is_staged {
+        summary.file_name = display_name;
+    }
+    *state.restore_file.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    Ok(Some(summary))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResult {
+    /// Where the data from before the restore is kept.
+    pub previous: String,
+    /// Set when Tidings is offline now because the restored proxy cannot be used.
+    pub offline: Option<String>,
+}
+
+/// Replaces everything with the backup `choose_backup` checked.
+#[tauri::command]
+pub async fn restore_backup(state: AppStateRef<'_>) -> Result<RestoreResult> {
+    // Kept until the restore succeeds, so the dialog can try again after a refusal.
+    let path = state
+        .restore_file
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| Error::msg("Choose a backup to restore first"))?;
+    translate::stop();
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || -> Result<RestoreResult> {
+        let mut conn = state.db();
+        // A refresh stores articles by feed id, which the restore gives to other feeds.
+        if state.refreshing() {
+            return Err(Error::msg("Feeds are being refreshed. Restore the backup when that is done."));
+        }
+        let previous = state.data_dir.join(backup::PREVIOUS_FILE);
+        let loaded = backup::restore(&mut conn, &path, &previous, &state.settings())?;
+        let offline = loaded.offline.clone();
+        state.restored(&conn, loaded)?;
+        *state.restore_file.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        if path == state.data_dir.join(RESTORE_STAGE_FILE) {
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(RestoreResult { previous: previous.display().to_string(), offline })
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))?
+}
+
+/// Saves every starred article in one file: "html" or "markdown".
+#[tauri::command]
+pub async fn export_starred(app: AppHandle, state: AppStateRef<'_>, format: String, images: bool) -> Result<Option<String>> {
+    use std::io::Write;
+    use tauri_plugin_fs::FsExt;
+    let markdown = match format.as_str() {
+        "html" => false,
+        "markdown" => true,
+        _ => return Err(Error::msg("Choose HTML or Markdown")),
+    };
+    if db::tree(&state.db())?.starred == 0 {
+        return Err(Error::msg("There are no starred articles to export"));
+    }
+    let (extension, label) = if markdown { ("md", "Markdown") } else { ("html", "HTML") };
+    let filename = format!("tidings-starred-{}.{extension}", today());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let dialog = app
+        .dialog()
+        .file()
+        .set_title("Export starred articles")
+        .set_file_name(&filename);
+    #[cfg(desktop)]
+    let dialog = dialog.add_filter(label, &[extension]);
+    #[cfg(target_os = "android")]
+    let dialog = dialog.add_filter(label, &[if markdown { "text/plain" } else { "text/html" }]);
+    #[cfg(desktop)]
+    let dialog = match app.get_webview_window("main") {
+        Some(window) => dialog.set_parent(&window),
+        None => dialog,
+    };
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
+    let articles = db::starred_articles(&state.db())?;
+    // Cleaning the HTML of many articles is CPU work: keep it off the async threads.
+    let text = tokio::task::spawn_blocking(move || {
+        if markdown { export::markdown(&articles, images) } else { export::html(&articles, images) }
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))?;
+    match file_path.clone().into_path() {
+        Ok(path) => {
+            files::write_private(&path, text.as_bytes())?;
+            Ok(Some(path.display().to_string()))
+        }
+        Err(_) => {
+            let display = display_file_name(&file_path, &filename);
+            let mut options = tauri_plugin_fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            let mut file = app.fs().open(file_path, options)?;
+            file.write_all(text.as_bytes())?;
+            Ok(Some(display))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -634,14 +965,181 @@ pub async fn ai_models(state: AppStateRef<'_>) -> Result<Vec<String>> {
 #[tauri::command]
 pub async fn make_brief(state: AppStateRef<'_>, query: ListQuery, title: String) -> Result<BriefView> {
     let settings = state.settings();
+    let generation = state.generation();
     let (sources, total) = db::brief_sources(&state.db(), &query, brief::MAX_ARTICLES)?;
     let title: String = title.trim().chars().take(200).collect();
     let title = if title.is_empty() { "Brief".to_string() } else { title };
     let (body, model) = brief::write(&state.net(), &settings, &title, &sources, total).await?;
     let query_json = serde_json::to_string(&query).map_err(|e| Error::msg(e.to_string()))?;
     let body_json = serde_json::to_string(&body).map_err(|e| Error::msg(e.to_string()))?;
-    let id = db::insert_brief(&state.db(), &title, &model, &query_json, &body_json)?;
+    let id = db::insert_brief(&*state.db_since(generation)?, &title, &model, &query_json, &body_json)?;
     brief_view(&state, id)?.ok_or_else(|| Error::msg("The brief was not stored"))
+}
+
+/// One part of a translation, as it is done: the title (`index` None) or a paragraph.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationPart {
+    article_id: i64,
+    full: bool,
+    lang: translate::Lang,
+    index: Option<usize>,
+    total: usize,
+    text: String,
+}
+
+/// Translates an article with the local model (translate.rs) into `lang`, or the
+/// usual language from the settings: the full text when it is loaded and
+/// `full_text` is set, else the feed's text. A stored translation is returned at
+/// once unless `again`. Parts arrive as "translation-part" events while the model works.
+#[tauri::command]
+pub async fn translate_article(
+    app: AppHandle,
+    state: AppStateRef<'_>,
+    id: i64,
+    full_text: Option<bool>,
+    again: Option<bool>,
+    lang: Option<translate::Lang>,
+) -> Result<translate::Translation> {
+    let generation = state.generation();
+    let settings = state.settings();
+    let lang = lang.unwrap_or_else(|| translate_to(&settings));
+    let row = db::article(&state.db(), id)?;
+    let full = full_text.unwrap_or(false) && row.full_content.is_some();
+    let stored = if again.unwrap_or(false) { None } else { db::translation(&state.db(), id, full, lang.code())? };
+    if let Some(found) = stored.and_then(|json| serde_json::from_str(&json).ok()) {
+        return Ok(found);
+    }
+    let source = if full { row.full_content.as_deref() } else { row.content.as_deref() };
+    let paragraphs = sanitize::paragraphs(source.unwrap_or(""));
+    let total = paragraphs.len();
+    let send = |index: Option<usize>, text: &str| {
+        let part = TranslationPart { article_id: id, full, lang, index, total, text: text.to_string() };
+        let _ = app.emit("translation-part", part);
+    };
+    let translation = translate::translate(&state.net(), &settings, lang, &row.title, &paragraphs, send).await?;
+    let json = serde_json::to_string(&translation).map_err(|e| Error::msg(e.to_string()))?;
+    db::save_translation(&*state.db_since(generation)?, id, full, lang.code(), &json)?;
+    Ok(translation)
+}
+
+/// Stops the translation that runs now.
+#[tauri::command]
+pub fn stop_translation() {
+    translate::stop();
+}
+
+// ---------------------------------------------------------------------------
+// Feed health and saved searches
+// ---------------------------------------------------------------------------
+
+/// The newest article and the article count of each feed (Feed health).
+#[tauri::command]
+pub fn feed_activity(state: AppStateRef<'_>) -> Result<Vec<db::FeedActivity>> {
+    db::feed_activity(&state.db())
+}
+
+/// How many articles a list query matches: the unread counts of saved searches.
+#[tauri::command]
+pub fn count_articles(state: AppStateRef<'_>, query: ListQuery) -> Result<i64> {
+    db::count_articles(&state.db(), &query)
+}
+
+#[tauri::command]
+pub fn list_searches(state: AppStateRef<'_>) -> Result<Vec<db::SavedSearch>> {
+    db::searches(&state.db())
+}
+
+/// Saves the list state `state` (JSON from the UI) under `title`.
+#[tauri::command]
+pub fn save_search(state: AppStateRef<'_>, title: String, search: String) -> Result<db::SavedSearch> {
+    let title = db::search_title(&title)?;
+    if !db::search_state_is_valid(&search) {
+        return Err(Error::msg("This search cannot be saved"));
+    }
+    let id = db::insert_search(&state.db(), &title, &search)?;
+    Ok(db::SavedSearch { id, title, state: search })
+}
+
+#[tauri::command]
+pub fn rename_search(state: AppStateRef<'_>, id: i64, title: String) -> Result<()> {
+    db::rename_search(&state.db(), id, &db::search_title(&title)?)
+}
+
+#[tauri::command]
+pub fn delete_search(state: AppStateRef<'_>, id: i64) -> Result<()> {
+    db::delete_search(&state.db(), id)
+}
+
+// ---------------------------------------------------------------------------
+// Filter rules (rules.rs)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_rules(state: AppStateRef<'_>) -> Result<Vec<Rule>> {
+    db::rules(&state.db())
+}
+
+/// Stores a new rule (id 0) or changes one, and returns it as stored.
+#[tauri::command]
+pub fn save_rule(state: AppStateRef<'_>, rule: Rule) -> Result<Rule> {
+    let rule = rule.validated()?;
+    let conn = state.db();
+    let id = db::save_rule(&conn, &rule)?;
+    db::rule(&conn, id)
+}
+
+#[tauri::command]
+pub fn delete_rule(state: AppStateRef<'_>, id: i64) -> Result<()> {
+    db::delete_rule(&state.db(), id)
+}
+
+/// Articles are looked at this many at a time, so the database is free between
+/// batches for the rest of the app.
+const RULE_BATCH: usize = 500;
+
+/// The stored articles a rule (saved or not) would change now.
+fn rule_matches(state: &AppState, rule: &Rule) -> Result<Vec<i64>> {
+    let feeds = db::rule_feeds(&state.db(), rule)?;
+    let (mut all, mut after) = (Vec::new(), 0);
+    loop {
+        let (matched, last) = db::rule_batch(&state.db(), rule, &feeds, after, RULE_BATCH)?;
+        all.extend(matched);
+        match last {
+            Some(id) => after = id,
+            None => return Ok(all),
+        }
+    }
+}
+
+/// How many stored articles a rule (saved or not) would change now.
+#[tauri::command]
+pub async fn count_rule_matches(state: AppStateRef<'_>, rule: Rule) -> Result<usize> {
+    let rule = rule.validated()?;
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || rule_matches(&state, &rule).map(|ids| ids.len()))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))?
+}
+
+/// Does what a saved rule says to the stored articles it matches. Returns how many.
+#[tauri::command]
+pub async fn apply_rule(state: AppStateRef<'_>, id: i64) -> Result<usize> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let rule = db::rule(&state.db(), id)?;
+        let ids = rule_matches(&state, &rule)?;
+        let conn = state.db();
+        for chunk in ids.chunks(RULE_BATCH) {
+            db::apply_rule_to(&conn, &rule, chunk)?;
+        }
+        if rule.action == "delete" {
+            db::checkpoint(&conn);
+        }
+        Ok(ids.len())
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))?
 }
 
 /// Past briefs, newest first.
@@ -741,6 +1239,6 @@ pub fn app_info(state: AppStateRef<'_>) -> AppInfo {
         data_dir: state.data_dir.display().to_string(),
         platform: std::env::consts::OS,
         media_base: state.media_base.get().cloned(),
-        startup_warning: state.startup_warning.clone(),
+        startup_warning: state.startup_warning.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     }
 }

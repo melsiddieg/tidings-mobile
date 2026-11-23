@@ -55,6 +55,20 @@ export interface Feed {
   detectedType: FeedType;
   /** The user allowed Tidings to fetch this feed from the local network. */
   local: boolean;
+  /** Unix time it was added. */
+  createdAt: number;
+  /** Publication date of its newest article (Unix seconds), null when it has none. */
+  newest: number | null;
+}
+
+/** How the sidebar orders subscriptions. `manual` is the order made by dragging. */
+export type TreeSortKey = 'manual' | 'name' | 'added' | 'unread' | 'latest';
+
+export interface TreeSort {
+  key: TreeSortKey;
+  descending: boolean;
+  /** Sort feeds as well as folders. When false, feeds keep their manual order. */
+  feeds: boolean;
 }
 
 export interface Tree {
@@ -99,6 +113,106 @@ export interface ArticleDetail {
   hasFullText: boolean;
   enclosureUrl: string | null;
   enclosureType: string | null;
+  /** Mostly Chinese. */
+  chinese: boolean;
+  /** "zh" (Chinese), "ar" (Arabic) or "" (another language), for the translations offered. */
+  language: '' | 'zh' | 'ar';
+  /** Where a translation's paragraphs and the article's images go (articles that can be translated). */
+  translationLayout: TranslationBlock[];
+}
+
+/** A paragraph of a translation by its index, or one of the article's images as cleaned HTML. */
+export type TranslationBlock = { kind: 'text'; index: number } | { kind: 'image'; html: string };
+
+/** A feed's newest article and article count, for Feed health. */
+/** What a backup holds, shown before it is restored (backup.rs). */
+export interface BackupSummary {
+  fileName: string;
+  /** When it was made (Unix seconds) and by which version; null for a copy of the database file. */
+  createdAt: number | null;
+  version: string | null;
+  folders: number;
+  feeds: number;
+  articles: number;
+  unread: number;
+  starred: number;
+  rules: number;
+  searches: number;
+  /** Host and port of the feeds allowed on the local network. They keep that permission. */
+  localFeeds: string[];
+  /** The proxy now and after the restore, without passwords. */
+  proxyNow: string;
+  proxyAfter: string;
+  /** Set when the restored settings cannot be used: Tidings goes offline. */
+  offline: string | null;
+}
+
+export interface RestoreResult {
+  /** Where the data from before the restore is kept. */
+  previous: string;
+  offline: string | null;
+}
+
+export interface FeedActivity {
+  feedId: number;
+  newest: number | null;
+  articles: number;
+}
+
+/** The list state a saved search restores. */
+export interface SearchState {
+  scope: Scope;
+  filter: Filter;
+  query: string;
+  dateRange: DateRange;
+  typeFilter: FeedType | null;
+}
+
+/** A saved search in the sidebar; `state` is a SearchState as JSON. */
+export interface SavedSearch {
+  id: number;
+  title: string;
+  state: string;
+}
+
+/** A filter rule (rules.rs): when `field` contains one of `words`, do `action`. */
+export interface Rule {
+  /** 0 for a rule that is not saved yet. */
+  id: number;
+  enabled: boolean;
+  /** The feed or folder the rule is for; neither: all feeds. */
+  feedId: number | null;
+  folderId: number | null;
+  field: 'title' | 'text' | 'author' | 'link';
+  /** Phrases separated by commas. */
+  words: string;
+  action: 'read' | 'star' | 'delete';
+  /** Articles the rule matched so far. */
+  hits: number;
+}
+
+/** The language of a translation: English or Arabic. */
+export type TranslateLang = 'en' | 'ar';
+
+/** An article translated by the local model (translate.rs). */
+export interface Translation {
+  title: string;
+  paragraphs: string[];
+  model: string;
+  /** The article was longer than what was translated. */
+  cut: boolean;
+  lang: TranslateLang;
+}
+
+/** One part of a translation while the model works ("translation-part" event). */
+export interface TranslationPart {
+  articleId: number;
+  full: boolean;
+  lang: TranslateLang;
+  /** null for the title, else the paragraph's index. */
+  index: number | null;
+  total: number;
+  text: string;
 }
 
 export interface ReaderPage {
@@ -122,10 +236,33 @@ export interface Candidate {
 }
 
 export interface ImportStats {
+  /** New feeds added and new folders made. */
   feeds: number;
   folders: number;
+  /** Subscribed feeds moved to the file's folders. */
+  moved: number;
+  /** Already subscribed, listed twice, or without a usable address. */
   skipped: number;
 }
+
+/** What an OPML import would do (opml::preview). */
+export interface ImportPreview {
+  fileName: string;
+  inFile: number;
+  newFeeds: number;
+  subscribed: number;
+  repeated: number;
+  invalid: number;
+  newTitles: string[];
+  /** Subscribed feeds the file puts in another folder: how many, and the first few. */
+  moveCount: number;
+  moves: { title: string; from: string; to: string }[];
+  newFoldersKeep: number;
+  newFoldersFile: number;
+}
+
+/** Keep the folders of subscribed feeds, or move them to the file's folders. */
+export type ImportLayout = 'keep' | 'file';
 
 export interface AppInfo {
   version: string;
@@ -163,6 +300,10 @@ export interface Settings {
   aiProvider: '' | 'ollama' | 'openai';
   aiEndpoint: string;
   aiModel: string;
+  /** The model that translates articles; empty uses aiModel. */
+  translateModel: string;
+  /** The usual translation language: English (Chinese and Arabic articles) or Arabic (all others). */
+  translateTo: TranslateLang;
 }
 
 /** A PeerTube video file chosen by src-tauri/src/peertube.rs. */
@@ -314,6 +455,12 @@ export type Dialog =
   | { kind: 'settings'; section?: string }
   | { kind: 'shortcuts' }
   | { kind: 'date-range' }
+  | { kind: 'feed-health' }
+  /** Name a saved search: a new one from the list as it is (`id` null), or rename one. */
+  | { kind: 'save-search'; id: number | null; title: string }
+  | { kind: 'restore'; summary: BackupSummary }
+  | { kind: 'export-starred' }
+  | { kind: 'import-opml'; preview: ImportPreview }
   | {
       kind: 'confirm';
       title: string;

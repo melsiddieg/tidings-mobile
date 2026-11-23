@@ -48,6 +48,7 @@
   }
 
   const folders = $derived(folderOptions(store.root));
+  const folderTitle = $derived(folderId == null ? null : (store.folderById.get(folderId)?.title ?? null));
 
   async function find(allowLocal = false) {
     if (!url.trim()) return;
@@ -80,6 +81,7 @@
       const id = await api.addFeed(candidate.url, folderId, title, allowLocal);
       store.watchFeed(id);
       await store.reloadTree();
+      if (folderId != null) store.revealFolder(folderId);
       store.selectScope({ kind: 'feed', id });
       store.dialog = null;
       store.toast(`Subscribed to ${title ?? hostOf(candidate.url)}`, 'success');
@@ -97,7 +99,7 @@
   }
 </script>
 
-<Modal title="Add a feed" width={500}>
+<Modal title={folderTitle ? `Add a feed to ${folderTitle}` : 'Add a feed'} width={500}>
   <form id="add-feed" class="form" {onsubmit}>
     <div class="field">
       <label for="feed-url">Website or feed address</label>
@@ -119,12 +121,16 @@
           autocapitalize="off"
         />
       </div>
-      <p class="hint">Paste a website and Tidings will find its feed. RSS, Atom and JSON Feed are supported.</p>
+      <p class="hint">
+        Paste any page: a website, an article, a YouTube channel or video, a subreddit, a GitHub project, a Medium
+        writer, an Apple Podcasts page or a public Telegram channel (t.me link). Tidings finds its feed. RSS, Atom and
+        JSON Feed are supported.
+      </p>
     </div>
 
     {#if candidates.length > 0}
       <div class="field">
-        <span class="field-label">{candidates.length === 1 ? 'This site names one feed' : `This site has ${candidates.length} feeds`}</span>
+        <span class="field-label">{candidates.length === 1 ? 'Tidings found one feed' : `Tidings found ${candidates.length} feeds`}</span>
         <div class="candidates" role="radiogroup">
           {#each candidates as c, i (c.url)}
             <label class="candidate" class:on={chosen === i}>

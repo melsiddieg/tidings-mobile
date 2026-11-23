@@ -8,6 +8,7 @@
   import ArticleView from './components/ArticleView.svelte';
   import ReaderTab from './components/ReaderTab.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
+  import ImportOpmlDialog from './components/ImportOpmlDialog.svelte';
   import Toasts from './components/Toasts.svelte';
   import BriefView from './components/BriefView.svelte';
   import PlayerBar from './components/PlayerBar.svelte';
@@ -19,6 +20,10 @@
   import SettingsDialog from './components/SettingsDialog.svelte';
   import ShortcutsDialog from './components/ShortcutsDialog.svelte';
   import DateRangeDialog from './components/DateRangeDialog.svelte';
+  import FeedHealthDialog from './components/FeedHealthDialog.svelte';
+  import SaveSearchDialog from './components/SaveSearchDialog.svelte';
+  import RestoreDialog from './components/RestoreDialog.svelte';
+  import ExportStarredDialog from './components/ExportStarredDialog.svelte';
 
   onMount(() => {
     store.init();
@@ -147,6 +152,9 @@
       case 'i':
         store.send('images');
         break;
+      case 't':
+        store.send('translate');
+        break;
       case 'c':
         store.send('copy-link');
         break;
@@ -239,10 +247,22 @@
     <ShortcutsDialog />
   {:else if store.dialog?.kind === 'date-range'}
     <DateRangeDialog />
+  {:else if store.dialog?.kind === 'feed-health'}
+    <FeedHealthDialog />
+  {:else if store.dialog?.kind === 'save-search'}
+    <SaveSearchDialog dialog={store.dialog} />
+  {:else if store.dialog?.kind === 'restore'}
+    <RestoreDialog summary={store.dialog.summary} />
+  {:else if store.dialog?.kind === 'export-starred'}
+    <ExportStarredDialog />
+  {:else if store.dialog?.kind === 'import-opml'}
+    <ImportOpmlDialog preview={store.dialog.preview} />
   {/if}
 
   {#if store.menu}
-    <ContextMenu menu={store.menu} />
+    {#key store.menu}
+      <ContextMenu menu={store.menu} />
+    {/key}
   {/if}
   <Toasts />
 </div>

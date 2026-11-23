@@ -20,6 +20,10 @@ use crate::state::AppState;
 
 /// The most items read from one fetch of a feed.
 pub const MAX_ENTRIES: usize = 5_000;
+/// Titles of feeds and articles are cut at this many characters, and author names
+/// at `MAX_AUTHOR_CHARS`. A feed could otherwise fill the article list with one title.
+const MAX_TITLE_CHARS: usize = 500;
+const MAX_AUTHOR_CHARS: usize = 200;
 
 pub const FEED_ACCEPT: &str = "application/rss+xml, application/atom+xml, application/feed+json, \
     application/json;q=0.9, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5";
@@ -82,6 +86,9 @@ pub async fn refresh_many(app: &AppHandle, state: &Arc<AppState>, ids: Vec<i64>)
         });
     }
     while tasks.join_next().await.is_some() {}
+    // A refresh applies the archive rule, which clears the text of old articles.
+    // Empty the write-ahead log, so that text does not stay in its old pages.
+    db::checkpoint(&state.db());
 }
 
 pub async fn refresh_one(app: &AppHandle, state: &AppState, id: i64) -> FeedUpdated {
@@ -231,11 +238,23 @@ pub struct ParsedFeed {
 }
 
 pub fn parse_raw(bytes: &[u8], url: &Url) -> Result<model::Feed> {
-    feed_rs::parser::Builder::new()
-        .base_uri(Some(url.as_str()))
-        .build()
-        .parse(bytes)
-        .map_err(|e| {
+    use feed_rs::parser::{ParseErrorKind, ParseFeedError};
+    let parse = |bytes: &[u8]| feed_rs::parser::Builder::new().base_uri(Some(url.as_str())).build().parse(bytes);
+    // A Telegram channel's web preview: its posts, written out as an Atom feed.
+    if crate::telegram::is_telegram(url) {
+        let atom = crate::telegram::to_atom(&String::from_utf8_lossy(bytes), url)?;
+        return parse(atom.as_bytes()).map_err(|e| Error::msg(format!("Could not read the Telegram channel: {e}")));
+    }
+    let mut parsed = parse(bytes);
+    // feed-rs refuses a whole feed when one text element is empty, such as an empty
+    // <media:description> on a YouTube video or an empty Atom <summary>. Try again
+    // without the empty ones. Feeds that parse are never changed.
+    if matches!(parsed, Err(ParseFeedError::ParseError(ParseErrorKind::MissingContent { .. }))) {
+        if let Some(cleaned) = without_empty_text(bytes) {
+            parsed = parse(&cleaned);
+        }
+    }
+    parsed.map_err(|e| {
             let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).to_ascii_lowercase();
             if head.contains("<html") || head.contains("<!doctype html") {
                 Error::msg("This address is a web page, not a feed")
@@ -245,9 +264,65 @@ pub fn parse_raw(bytes: &[u8], url: &Url) -> Result<model::Feed> {
         })
 }
 
+/// Text elements that feed-rs refuses when they are empty: Atom's title, subtitle,
+/// summary, rights and content, and Media RSS title and description.
+const TEXT_ELEMENTS: &[&str] = &["title", "subtitle", "summary", "rights", "content", "description"];
+
+/// The feed without text elements that hold nothing but spaces, or `None` when it
+/// has none or is not UTF-8 XML. Only elements whose attributes are at most `type`,
+/// `xml:lang` and `xml:base` go: `<media:content url=...>` and `<content src=...>`
+/// stay. They are cut out of the original bytes, so nothing else changes.
+fn without_empty_text(bytes: &[u8]) -> Option<Vec<u8>> {
+    use quick_xml::events::{BytesStart, Event};
+    let text = std::str::from_utf8(bytes).ok()?;
+    let removable = |e: &BytesStart<'_>| {
+        TEXT_ELEMENTS.contains(&e.local_name().as_ref())
+            && e.attributes().all(|a| a.is_ok_and(|a| matches!(a.key.as_ref(), "type" | "xml:lang" | "xml:base")))
+    };
+    let mut reader = quick_xml::Reader::from_str(text);
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    // An element that may turn out empty: where it starts and its name.
+    let mut open: Option<(usize, String)> = None;
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader.read_event().ok()?;
+        let after = reader.buffer_position() as usize;
+        match event {
+            Event::Eof => break,
+            Event::Empty(e) if removable(&e) => cuts.push((before, after)),
+            Event::Start(e) if removable(&e) => open = Some((before, e.name().as_ref().to_string())),
+            Event::Text(t) if open.is_some() && t.as_ref().chars().all(|c| c.is_ascii_whitespace()) => {}
+            Event::End(e) => {
+                if let Some((start, name)) = open.take() {
+                    if name == e.name().as_ref() {
+                        cuts.push((start, after));
+                    }
+                }
+            }
+            _ => open = None,
+        }
+    }
+    if cuts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    for (start, end) in cuts {
+        out.extend_from_slice(&bytes[at..start]);
+        at = end;
+    }
+    out.extend_from_slice(&bytes[at..]);
+    Some(out)
+}
+
 pub fn parse_feed(bytes: &[u8], url: &Url, strip_tracking: bool) -> Result<ParsedFeed> {
     let feed = parse_raw(bytes, url)?;
-    let title = feed.title.as_ref().map(text_plain).filter(|t| !t.is_empty());
+    let title = feed
+        .title
+        .as_ref()
+        .map(text_plain)
+        .filter(|t| !t.is_empty())
+        .map(|t| sanitize::truncate(&t, MAX_TITLE_CHARS));
     let site_url = feed
         .links
         .iter()
@@ -393,13 +468,14 @@ fn entry_to_article(entry: &model::Entry, feed_url: &Url, strip_tracking: bool) 
         .as_ref()
         .map(text_plain)
         .filter(|t| !t.is_empty())
+        .map(|t| sanitize::truncate(&t, MAX_TITLE_CHARS))
         .unwrap_or_else(|| if text.is_empty() { "Untitled".into() } else { sanitize::truncate(&text, 90) });
     let authors: Vec<String> = entry
         .authors
         .iter()
         .filter_map(|p| p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string))
         .collect();
-    let author = (!authors.is_empty()).then(|| authors.join(", "));
+    let author = (!authors.is_empty()).then(|| sanitize::truncate(&authors.join(", "), MAX_AUTHOR_CHARS));
 
     let image_url = media_image(entry)
         .and_then(|u| web_url(&u, &base))
@@ -433,6 +509,10 @@ fn entry_to_article(entry: &model::Entry, feed_url: &Url, strip_tracking: bool) 
 // ---------------------------------------------------------------------------
 
 fn icon_links(html: &str, page: &Url) -> Vec<Url> {
+    // Deeply nested elements make the parser slow (`sanitize::too_deep`).
+    if sanitize::too_deep(html) {
+        return Vec::new();
+    }
     let doc = Document::from(html);
     let mut scored: Vec<(i32, Url)> = Vec::new();
     for link in doc.select("link[rel][href]").iter() {

@@ -17,14 +17,30 @@ import type {
   ListQuery,
   MenuItem,
   RefreshProgress,
+  SavedSearch,
   Scope,
+  SearchState,
   Settings,
   Tab,
   Tree,
+  TreeSort,
+  ImportLayout,
+  TranslateLang,
   VideoPlayer,
 } from './types';
-import { buildTree, childRef, flattenFeeds, isVideoLink, sameItem } from './util';
-import { FEED_TYPES, isAnyTime, rangeBounds, rangeLabel, typeInfo, validRange, type TypeInfo } from './filters';
+import { buildTree, childRef, flattenFeeds, folderOptions, hostOf, isVideoLink, sameItem } from './util';
+import {
+  FEED_TYPES,
+  SORT_KEYS,
+  isAnyTime,
+  rangeBounds,
+  rangeLabel,
+  sortLabel,
+  typeInfo,
+  validRange,
+  validSort,
+  type TypeInfo,
+} from './filters';
 
 const PAGE = 150;
 const MAIN_TAB: Tab = { id: 'main', kind: 'main' };
@@ -53,6 +69,8 @@ export const DEFAULT_SETTINGS: Settings = {
   aiProvider: '',
   aiEndpoint: '',
   aiModel: '',
+  translateModel: '',
+  translateTo: 'en',
 };
 
 // UI preferences that are not worth a database round trip live in localStorage.
@@ -102,8 +120,13 @@ class Store {
   private markAnchor: string | null = null;
   /** The external video player, or null when none is found. */
   videoPlayer = $state<VideoPlayer | null>(null);
-  /** AI briefs are set up: a local model server and a model (Settings → AI briefs). */
+  /** AI briefs are set up: a local model server and a model (Settings → Local AI). */
   aiReady = $derived(this.settings.aiProvider !== '' && this.settings.aiModel.trim() !== '');
+  /** Translations are set up: the same server, and a model for them or for briefs. */
+  translateReady = $derived(this.settings.aiProvider !== '' && (this.settings.translateModel.trim() || this.settings.aiModel.trim()) !== '');
+  /** Articles translated in this session, and into which language: they show
+   *  translated when opened again. */
+  translated = new Map<number, TranslateLang>();
   /** Brief tabs whose brief is being written, and the error of each that failed. */
   briefsRunning = $state<string[]>([]);
   briefErrors = $state<Record<string, string>>({});
@@ -122,6 +145,14 @@ class Store {
   /** Only feeds of this type inside the scope (the type icons above the list). Resets
    *  when another feed or folder is selected. */
   typeFilter = $state<FeedType | null>(null);
+  /** Saved searches in the sidebar, and the unread articles each finds now. */
+  searches = $state<SavedSearch[]>([]);
+  searchCounts = $state<Record<number, number>>({});
+  /** The saved search the list shows now, if it shows one exactly. */
+  activeSearchId = $derived.by(() => {
+    const now = JSON.stringify(this.searchState());
+    return this.searches.find((s) => s.state === now)?.id ?? null;
+  });
 
   articles = $state<ArticleItem[]>([]);
   hasMore = $state(false);
@@ -149,7 +180,9 @@ class Store {
   /** Keyboard commands for the article view in the active tab. */
   command = $state<{ name: string; seq: number }>({ name: '', seq: 0 });
 
-  root = $derived(buildTree(this.tree));
+  /** How the sidebar orders subscriptions; kept on this computer. */
+  treeSort = $state<TreeSort>(validSort(local.get<unknown>('treeSort', null)));
+  root = $derived(buildTree(this.tree, this.treeSort));
   feedOrder = $derived(flattenFeeds(this.root));
   feedById = $derived(new Map(this.tree.feeds.map((f) => [f.id, f])));
   nodeById = $derived.by(() => {
@@ -175,6 +208,15 @@ class Store {
   });
   folderById = $derived(new Map(this.tree.folders.map((f) => [f.id, f])));
   unreadTotal = $derived(this.tree.feeds.reduce((sum, f) => sum + f.unread, 0));
+  /** Feeds whose name or address has every word of the search, in sidebar order. */
+  feedMatches = $derived.by(() => {
+    const words = this.query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    return this.feedOrder.filter((f) => {
+      const text = `${f.title} ${f.feedTitle} ${hostOf(f.url)} ${hostOf(f.siteUrl)}`.toLowerCase();
+      return words.every((w) => text.includes(w));
+    });
+  });
   /** Feed types that have at least one feed, with their unread counts, in sidebar order. */
   typeSummary = $derived.by(() => {
     const rows: { info: TypeInfo; feeds: number; unread: number }[] = [];
@@ -266,6 +308,12 @@ class Store {
       this.info = info;
       setMediaBase(info.mediaBase);
       if (info.startupWarning) this.toast(info.startupWarning, 'error');
+      // Set by `restoreBackup` before it reloaded the window.
+      const notice = local.get<string | null>('notice', null);
+      if (notice) {
+        local.set('notice', null);
+        this.toast(notice, 'success');
+      }
     } catch (err) {
       this.error(err);
     }
@@ -276,6 +324,7 @@ class Store {
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyAppearance());
     try {
       if (!this.scopeExists(this.scope)) this.scope = { kind: 'all' };
+      this.loadSearches();
       this.restoreTabs();
       await this.loadArticles(false);
       await on<FeedUpdated>('feed-updated', (e) => this.onFeedUpdated(e));
@@ -341,6 +390,11 @@ class Store {
     this.menu = { x: r.left, y: r.bottom + 4, items };
   }
 
+  /** A second menu where the first one was opened ("Change type", "Sort"). */
+  openMenuAtPoint(x: number, y: number, items: MenuItem[]) {
+    this.menu = { x, y, items };
+  }
+
   confirm(title: string, message: string, confirmLabel: string, onConfirm: () => void | Promise<void>, danger = true) {
     this.dialog = { kind: 'confirm', title, message, confirmLabel, danger, onConfirm };
   }
@@ -357,6 +411,7 @@ class Store {
     try {
       this.tree = await api.tree();
       if (!this.scopeExists(this.scope)) this.selectScope({ kind: 'all' });
+      this.loadSearchCounts();
     } catch (err) {
       this.error(err);
     }
@@ -370,6 +425,7 @@ class Store {
         const map = new Map(counts.feeds);
         for (const feed of this.tree.feeds) feed.unread = map.get(feed.id) ?? 0;
         this.tree.starred = counts.starred;
+        this.loadSearchCounts();
       } catch {
         /* counts are cosmetic */
       }
@@ -378,6 +434,108 @@ class Store {
 
   feedIcon(feedId: number): Feed | undefined {
     return this.feedById.get(feedId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Saved searches
+  // -------------------------------------------------------------------------
+
+  /** What a saved search keeps of the list: everything but the sort order. */
+  searchState(): SearchState {
+    return {
+      scope: $state.snapshot(this.scope),
+      filter: this.filter,
+      query: this.query.trim(),
+      dateRange: $state.snapshot(this.dateRange),
+      typeFilter: this.typeFilter,
+    };
+  }
+
+  /** A saved search's state, or null when it cannot be read or its feed or folder is gone. */
+  parseSearch(search: SavedSearch): SearchState | null {
+    try {
+      const state = JSON.parse(search.state) as SearchState;
+      return state && this.scopeExists(state.scope) ? state : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async loadSearches() {
+    try {
+      this.searches = await api.searches();
+      await this.loadSearchCounts();
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** The unread articles each saved search finds now. */
+  async loadSearchCounts() {
+    const counts: Record<number, number> = {};
+    for (const search of this.searches) {
+      const state = this.parseSearch(search);
+      if (!state) continue;
+      const query: ListQuery = {
+        scope: state.scope,
+        filter: 'unread',
+        query: state.query,
+        oldestFirst: false,
+        limit: 0,
+        offset: 0,
+        ...rangeBounds(validRange(state.dateRange)),
+        feedType: state.typeFilter,
+      };
+      try {
+        counts[search.id] = await api.countArticles(query);
+      } catch {
+        /* counts are cosmetic */
+      }
+    }
+    this.searchCounts = counts;
+  }
+
+  /** Shows the list a saved search keeps. */
+  openSearch(search: SavedSearch) {
+    const state = this.parseSearch(search);
+    if (!state) {
+      this.toast('The feed or folder of this search was removed');
+      return;
+    }
+    this.scope = state.scope;
+    this.filter = state.filter;
+    this.query = state.query;
+    this.dateRange = validRange(state.dateRange);
+    this.typeFilter = state.typeFilter;
+    local.set('scope', this.scope);
+    local.set('filter', this.filter);
+    local.set('dateRange', this.dateRange);
+    this.selectedId = null;
+    this.activeTabId = 'main';
+    this.sidebarOpen = false;
+    this.loadArticles(false);
+  }
+
+  /** Saves the list as it is now (`id` null), or renames a saved search. */
+  async nameSearch(id: number | null, title: string): Promise<boolean> {
+    try {
+      if (id == null) await api.saveSearch(title, JSON.stringify(this.searchState()));
+      else await api.renameSearch(id, title);
+      await this.loadSearches();
+      return true;
+    } catch (err) {
+      this.error(err);
+      return false;
+    }
+  }
+
+  async deleteSearch(id: number) {
+    try {
+      await api.deleteSearch(id);
+      await this.loadSearches();
+    } catch (err) {
+      this.error(err);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1116,7 +1274,22 @@ class Store {
   /** The context menu for a right-click on one of several marked items. */
   markedMenu(e: MouseEvent) {
     const n = this.marked.length;
+    const feeds = this.marked
+      .filter((key) => key.startsWith('feed:'))
+      .map((key) => this.feedById.get(Number(key.slice(5))))
+      .filter((f): f is Feed => !!f);
+    const { clientX: x, clientY: y } = e;
     this.openMenu(e, [
+      ...(feeds.length
+        ? [
+            {
+              label: feeds.length === 1 ? 'Change type of 1 feed' : `Change type of ${feeds.length} feeds`,
+              icon: 'filter',
+              action: () => this.openMenuAtPoint(x, y, this.typeMenuItems(feeds)),
+            },
+            { separator: true },
+          ]
+        : []),
       { label: `Delete ${n} items…`, icon: 'trash', danger: true, action: () => this.deleteMarked() },
       { separator: true },
       { label: 'Clear selection', icon: 'x', action: () => this.clearMarks() },
@@ -1129,6 +1302,119 @@ class Store {
     folder.expanded = !folder.expanded;
     try {
       await api.setFolderExpanded(id, folder.expanded);
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** "Technology / Linux" for a folder, "" for the top level. */
+  folderPath(id: number | null): string {
+    const names: string[] = [];
+    let f = id == null ? undefined : this.folderById.get(id);
+    for (let depth = 0; f && depth < 64; depth++) {
+      names.unshift(f.title);
+      f = f.parentId == null ? undefined : this.folderById.get(f.parentId);
+    }
+    return names.join(' / ');
+  }
+
+  /** Folders to move a feed to, in sidebar order; a check marks where it is. */
+  folderMenuItems(feed: Feed): MenuItem[] {
+    const folders = folderOptions(this.root);
+    return [
+      { label: 'No folder', checked: feed.folderId == null, action: () => this.moveFeedTo(feed, null) },
+      ...(folders.length ? [{ separator: true }] : []),
+      ...folders.map((f) => ({
+        // Em spaces indent like the tree; the menu does not collapse them.
+        label: `${'\u2003'.repeat(f.depth)}${f.title}`,
+        checked: feed.folderId === f.id,
+        action: () => this.moveFeedTo(feed, f.id),
+      })),
+    ];
+  }
+
+  async moveFeedTo(feed: Feed, folderId: number | null) {
+    if (feed.folderId === folderId) return;
+    if (!(await this.moveItem({ kind: 'feed', id: feed.id }, folderId, null))) return;
+    if (folderId != null) this.revealFolder(folderId);
+    this.toast(`Moved “${feed.title}” to ${folderId == null ? 'the top level' : this.folderPath(folderId)}`, 'success');
+  }
+
+  /** Leaves the search and shows a feed, with its folder open in the sidebar. */
+  showFeed(feed: Feed) {
+    this.query = '';
+    if (feed.folderId != null) this.revealFolder(feed.folderId);
+    this.selectScope({ kind: 'feed', id: feed.id });
+  }
+
+  /** Opens a folder and the folders around it, so a feed added there shows. */
+  revealFolder(id: number) {
+    const closed: number[] = [];
+    let f = this.folderById.get(id);
+    for (let depth = 0; f && depth < 64; depth++) {
+      if (!f.expanded) closed.push(f.id);
+      f = f.parentId == null ? undefined : this.folderById.get(f.parentId);
+    }
+    if (closed.length) this.setExpanded(true, closed);
+  }
+
+  /** The Add Feed dialog. Without a folder it uses the selected folder, or the
+   *  folder of the selected feed. */
+  addFeed(folderId?: number | null) {
+    let target = folderId ?? null;
+    if (folderId === undefined) {
+      const s = this.scope;
+      if (s.kind === 'folder') target = s.id;
+      else if (s.kind === 'feed') target = this.feedById.get(s.id)?.folderId ?? null;
+    }
+    this.dialog = { kind: 'add-feed', folderId: target };
+  }
+
+  setTreeSort(patch: Partial<TreeSort>) {
+    this.treeSort = { ...this.treeSort, ...patch };
+    local.set('treeSort', this.treeSort);
+  }
+
+  /** The sort menu: what to sort by, which way, and whether feeds are sorted too. */
+  sortMenuItems(): MenuItem[] {
+    const sort = this.treeSort;
+    const manual = sort.key === 'manual';
+    const key = SORT_KEYS.find((k) => k.key === sort.key) ?? SORT_KEYS[0];
+    return [
+      ...SORT_KEYS.map((k) => ({ label: k.label, checked: sort.key === k.key, action: () => this.setTreeSort({ key: k.key }) })),
+      { separator: true },
+      { label: manual ? 'Ascending' : `Ascending (${key.up})`, checked: !manual && !sort.descending, disabled: manual, action: () => this.setTreeSort({ descending: false }) },
+      { label: manual ? 'Descending' : `Descending (${key.down})`, checked: !manual && sort.descending, disabled: manual, action: () => this.setTreeSort({ descending: true }) },
+      { separator: true },
+      { label: 'Sort feeds too', checked: !manual && sort.feeds, disabled: manual, action: () => this.setTreeSort({ feeds: !sort.feeds }) },
+    ];
+  }
+
+  /** Types to choose from for these feeds. A check marks the choice they all share. */
+  typeMenuItems(feeds: Feed[]): MenuItem[] {
+    const all = (type: FeedType | null) => feeds.every((f) => f.typeOverride === type);
+    const detected = feeds.length === 1 ? ` (${typeInfo(feeds[0].detectedType).one})` : '';
+    return [
+      { label: `Automatic${detected}`, checked: all(null), action: () => this.setFeedType(feeds, null) },
+      { separator: true },
+      ...FEED_TYPES.map((t) => ({ label: t.one, checked: all(t.value), action: () => this.setFeedType(feeds, t.value) })),
+    ];
+  }
+
+  /** Sets the type of feeds by hand; `null` goes back to the detected type. */
+  async setFeedType(feeds: Feed[], type: FeedType | null) {
+    if (!feeds.length) return;
+    try {
+      await api.setFeedType(
+        feeds.map((f) => f.id),
+        type,
+      );
+      await this.reloadTree();
+      // The list may show a type scope or a type filter that these feeds left or joined.
+      await this.loadArticles();
+      const what = feeds.length === 1 ? `“${feeds[0].title}”` : `${feeds.length} feeds`;
+      if (type) this.toast(`${what} now ${feeds.length === 1 ? 'shows' : 'show'} under ${typeInfo(type).label}`, 'success');
+      else this.toast(`${what} ${feeds.length === 1 ? 'uses its' : 'use their'} detected type again`, 'success');
     } catch (err) {
       this.error(err);
     }
@@ -1173,14 +1459,24 @@ class Store {
   }
 
   /** Moves a feed or folder into `parentId` (null = top level), before `before` or at the end. */
-  async moveItem(item: ItemRef, parentId: number | null, before: ItemRef | null) {
-    if (sameItem(item, before)) return;
+  async moveItem(item: ItemRef, parentId: number | null, before: ItemRef | null): Promise<boolean> {
+    if (sameItem(item, before)) return false;
+    // In a sorted list a new place in the same folder would not show. Moving into
+    // another folder still works.
+    const sorted = this.treeSort.key !== 'manual' && (item.kind === 'folder' || this.treeSort.feeds);
+    const parentNow = item.kind === 'feed' ? this.feedById.get(item.id)?.folderId : this.folderById.get(item.id)?.parentId;
+    if (sorted && (parentNow ?? null) === parentId) {
+      this.toast(`The list is sorted by ${sortLabel(this.treeSort).toLowerCase()}. To arrange it by hand, choose Manual order in the sort menu.`);
+      return false;
+    }
     try {
       if (item.kind === 'feed') await api.moveFeed(item.id, parentId, before);
       else await api.moveFolder(item.id, parentId, before);
       await this.reloadTree();
+      return true;
     } catch (err) {
       this.error(err);
+      return false;
     }
   }
 
@@ -1209,19 +1505,35 @@ class Store {
     }
   }
 
+  /** Picks an OPML file and shows what importing it would do. */
   async importOpml() {
     try {
-      const stats = await api.importOpml();
-      if (!stats) return;
-      await this.reloadTree();
-      const parts = [`${stats.feeds} feed${stats.feeds === 1 ? '' : 's'}`];
-      if (stats.folders) parts.push(`${stats.folders} folder${stats.folders === 1 ? '' : 's'}`);
-      let text = `Imported ${parts.join(' in ')}`;
-      if (stats.skipped) text += ` · ${stats.skipped} already subscribed or invalid`;
-      this.toast(text, 'success');
+      const preview = await api.previewOpml();
+      if (!preview) return;
+      if (preview.newFeeds === 0 && preview.moveCount === 0) {
+        await api.cancelOpmlImport();
+        const n = preview.inFile;
+        this.toast(n ? `Nothing to import: you already follow all ${n === 1 ? 'the feed' : `${n} feeds`} in ${preview.fileName}, in the same folders` : `${preview.fileName} lists no feeds`);
+        return;
+      }
+      this.dialog = { kind: 'import-opml', preview };
     } catch (err) {
       this.error(err);
     }
+  }
+
+  /** Imports the file the preview showed. True when it was imported. */
+  async finishOpmlImport(layout: ImportLayout): Promise<boolean> {
+    const stats = await api.importOpml(layout);
+    this.dialog = null;
+    await this.reloadTree();
+    const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+    const parts = [`Added ${plural(stats.feeds, 'feed')}`];
+    if (stats.folders) parts[0] += ` and ${plural(stats.folders, 'folder')}`;
+    if (stats.moved) parts.push(`moved ${stats.moved}`);
+    if (stats.skipped) parts.push(`${stats.skipped} left out`);
+    this.toast(parts.join(' · '), 'success');
+    return true;
   }
 
   async exportOpml() {
@@ -1231,6 +1543,41 @@ class Store {
     } catch (err) {
       this.error(err);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Backup and restore
+  // -------------------------------------------------------------------------
+
+  async backup() {
+    try {
+      const path = await api.backup();
+      if (path) this.toast(`Backed up to ${path}`, 'success');
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** Lets the user pick a backup, then shows what restoring it would do. */
+  async chooseBackup() {
+    try {
+      const summary = await api.chooseBackup();
+      if (summary) this.dialog = { kind: 'restore', summary };
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** Restores the backup chosen in `chooseBackup`, then reloads the window. Errors go to the caller. */
+  async restoreBackup() {
+    const result = await api.restoreBackup();
+    // Feed, folder and brief ids now name other rows: forget the tabs and the list
+    // that point at them.
+    local.set('tabs', []);
+    local.set('activeTab', 'main');
+    local.set('scope', { kind: 'all' });
+    local.set('notice', `Backup restored. The data from before is kept in ${result.previous}`);
+    location.reload();
   }
 
   // -------------------------------------------------------------------------
@@ -1266,7 +1613,7 @@ class Store {
         this.dialog = { kind: 'settings' };
         break;
       case 'add-feed':
-        this.dialog = { kind: 'add-feed', folderId: null };
+        this.addFeed();
         break;
       case 'new-folder':
         this.dialog = { kind: 'folder', folderId: null, parentId: null };
@@ -1276,6 +1623,15 @@ class Store {
         break;
       case 'export-opml':
         this.exportOpml();
+        break;
+      case 'backup':
+        this.backup();
+        break;
+      case 'restore-backup':
+        this.chooseBackup();
+        break;
+      case 'export-starred':
+        this.dialog = { kind: 'export-starred' };
         break;
       case 'refresh-all':
         this.refresh();

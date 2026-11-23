@@ -5,6 +5,186 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-22
+
+### Added
+- Public Telegram channels as feeds. Paste a channel's `t.me` link (or a link to one of
+  its posts) in Add Feed. Telegram has no feeds, so Tidings reads the channel's public
+  web preview at `t.me/s/name`, which needs no account: the 20 newest posts at each
+  refresh, with text, photos, links, forwarded-from names and the channel's photo as
+  its icon. Videos show their picture and a link to watch them on Telegram. Channels
+  that are private or turned the preview off get a clear error.
+- Translation into Arabic. Settings → Local AI → **Translate into** chooses English (as
+  before: Chinese articles, and now Arabic ones too) or Arabic (every article that is not
+  in Arabic: English, Chinese and others). The Arabic text is shown right to left, with
+  the article's images in place. Under a translation, a link switches to the other
+  language where it fits, such as a Chinese article into Arabic. Translations are kept
+  per language; the ones made before stay as English translations.
+
+## [0.14.1] - 2026-11-22
+
+### Fixed
+- Feeds with an empty text element are read instead of failing as a whole. A YouTube
+  channel with a video that has no description (an empty `<media:description>`)
+  failed every refresh with "Could not read the feed: unable to parse feed: missing
+  text at position …", and so did Atom feeds with an empty `<title>`, `<summary>` or
+  `<content>`. This is a bug in feed-rs 3.0, the feed parser; when it refuses a feed
+  for this reason, Tidings now removes the empty elements and reads it again. Feeds
+  that parsed before are read exactly as before.
+
+## [0.14.0] - 2026-11-22
+
+### Added
+- OPML import shows what a file adds before it imports it: the new feeds, the feeds you
+  already follow (left out, so nothing is added twice), feeds listed twice in the file
+  and entries without a usable address. Addresses that differ only in `http` or `https`,
+  a leading `www.`, a trailing slash or the case of the host count as the same feed.
+- When the file puts feeds you follow in other folders, the import lists them and lets
+  you choose: keep your folders, where new feeds still go into the file's folders and
+  folders you do not have are added at the end; or use the file's folders, which also
+  moves those feeds. Folders left empty are kept, with their filter rules.
+- Search also finds feeds by name or address. They show above the matching articles,
+  each with the folder it is in, its unread count and a **Move** button; a click opens
+  the feed. While you search, each article shows its feed's folder.
+- **Move to folder** in a feed's right-click menu, and **Move feed to folder** in an
+  article's, list every folder with a check on the current one.
+
+### Changed
+- OPML import matches folder names without regard to case or spaces around them, so a
+  file's "ai" folder uses your "AI" folder instead of making a second one.
+
+## [0.13.0] - 2026-11-22
+
+### Added
+- Add a feed straight into a folder: a **+** shows on a folder's row when the pointer is
+  on it. The **+** at the top of the sidebar, the `…` menu and ⌘N now add to the selected
+  folder, or to the folder of the selected feed; the dialog's title names the folder.
+  A folder that was closed opens so the new feed shows.
+- Sort the subscriptions by name, date added, unread articles or latest article,
+  ascending or descending (the arrows next to Subscriptions, or the `…` menu). Folders
+  come first; "Sort feeds too" can be turned off to sort only folders. Manual order is
+  kept and comes back when you choose it. While the list is sorted, dragging still moves
+  items into other folders.
+- Change a feed's type from its right-click menu (**Change type**), for example a blog
+  that the detection put under Podcasts because it attaches audio. Select several feeds
+  to change them together. Automatic goes back to the detected type. This was already
+  possible in the feed's properties.
+
+## [0.12.0] - 2026-11-22
+
+### Added
+- Adding a feed finds it from more kinds of addresses. Paste an article, a YouTube video
+  or playlist, a subreddit or Reddit user, a GitHub project or user, a Medium writer,
+  publication or tag, or an Apple Podcasts or Overcast page. When a page names no feed,
+  Tidings looks at links in the page that lead to feeds, then at the site's home page,
+  then at common feed addresses, and loads each guess to check it before it offers it.
+  It also tries the common addresses when the page itself is refused, as behind a bot
+  check.
+
+### Fixed
+- A translation shows the article's images between its paragraphs, where they are in
+  the original, instead of leaving them out. Translations made by 0.10 and 0.11 keep
+  their paragraphs and get the images too.
+- Translations and briefs with a model that thinks before it answers (Qwen3, Qwen3.5)
+  on llama.cpp or another OpenAI-style server: Tidings now asks the model to answer at
+  once (`chat_template_kwargs`), as it already did with Ollama. Before, the thinking
+  could use up a passage's token limit and leave it blank. A passage that still gets no
+  answer now stops the translation with an error that says what to change.
+- Adding a YouTube video page no longer offers its oEmbed link as a feed: a feed link's
+  type must now match exactly.
+- A feed found on a page no longer takes the page's title (on an article, the
+  article's title) or a title such as "RSS"; it keeps the title the feed gives itself.
+
+### Security
+- url 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:`
+  URLs). Tidings does not call `Url::origin()`, and neither do Tauri, wry or reqwest.
+
+## [0.11.0] - 2026-11-21
+
+### Added
+- Backup and restore (Settings → Archive & data, the `…` menu, or File on macOS): one
+  file with your feeds, folders, articles with their read and starred state, settings,
+  rules, saved searches, briefs and translations. Before a restore, Tidings shows what
+  the backup holds and copies the current data to `tidings-before-restore.db` in the
+  data folder. A restore never turns off a proxy, "HTTPS only" or tracker removal that
+  is on now, and keeps this computer's video player. Restoring reads the file like one
+  from the internet: only the rows of the tables Tidings knows are copied, each value
+  checked, never the file's own tables, triggers or views.
+- Export starred articles to one HTML or Markdown file, with the full text where it was
+  loaded. Images are left out unless you ask for them.
+
+## [0.10.0] - 2026-11-21
+
+### Added
+- Translate Chinese articles into English with the local model that writes AI briefs:
+  a Translate button (or `T`) on articles that are mostly Chinese. The translation
+  appears paragraph by paragraph and is kept with the article until the article or its
+  text changes. Settings → Local AI (renamed from AI briefs) can name a model for
+  translations only.
+- Filter rules (Settings → Rules): when the title, the text, the author or the link
+  contains certain words, mark the article as read, star it or delete it, for all
+  feeds, a folder or one feed. Rules run on new articles, and on stored ones when you
+  ask, after a count and, for deleting, a confirmation. Words match whole and in any
+  case; `crypto*` matches the start of a word; Chinese matches inside sentences.
+  Starred articles are never deleted or marked as read by a rule.
+- Saved searches: keep a list (feed or folder, read filter, search words, dates, feed
+  type) under a name in the sidebar, with its unread count.
+- Feed health (`…` menu): feeds that fail, feeds quiet for six months or more, and
+  paused feeds, with retry, pause, resume and unsubscribe.
+
+## [0.9.6] - 2026-11-13
+
+### Security
+Fixes from a fourth audit, of 0.9.5.
+- A podcast or video address could still make the media engine fetch addresses by
+  itself, also on the local network and without the proxy. A streaming playlist (HLS)
+  placed after an ID3 tag passed the playlist check, because the file started with
+  binary bytes; GStreamer removes the tag and then plays the playlist. The check now
+  skips ID3v2 and APEv2 tags at the start of a file, fetching further when a tag holds
+  megabytes of cover art, and checks what follows. A file with more than 16 MB or 16
+  tags at its start is refused.
+- A tiny animated GIF could make the web view allocate 1 GB: the limits covered the
+  frames, not the picture they are drawn on. An animated GIF now keeps its frames
+  only up to 2400 pixels on a side, and frames times picture size are limited.
+- Deeply nested HTML in a feed could keep Tidings busy for many seconds (50,000
+  nested elements: 19 seconds) and stop the window. HTML that nests more than 200
+  deep is now shown as plain text, HTML is cut at 2 MB, and titles at 500 characters.
+  Reader mode, feed discovery and favicon lookup skip such pages. Articles are now
+  cleaned for display outside the main thread.
+- With no proxy set, Tidings used the system's proxy (`HTTP_PROXY` and the macOS
+  proxy settings). Such a proxy could also reach private addresses behind a public
+  name. An empty proxy setting now always means a direct connection, and mpv, IINA
+  and yt-dlp no longer get proxy variables from the environment either.
+- Exporting OPML to a name that is a symbolic link overwrote the file it pointed to.
+  The export now writes a new file and moves it over the name.
+- yt-dlp's output is read up to 16 MB ("Listen"); its error output keeps only the end.
+- Reader pages kept in memory hold at most 16 MB of HTML together.
+- ammonia 4.2.5 (RUSTSEC-2026-0533, mutation XSS with SVG and MathML). Tidings'
+  allowed tags were not affected: they include neither SVG, MathML nor the raw text
+  elements the attack needs.
+
+### Fixed
+- The audio server on 127.0.0.1 (Linux and the BSDs) retried a failed accept at
+  once, without waiting. An error that keeps coming back, such as too many open
+  files, kept one processor core busy. It now waits 100 ms between tries. (This also
+  made the macOS build of the tests hang.)
+
+## [0.9.5] - 2026-11-11
+
+### Security
+Notes from the review of 0.9.4.
+- A refresh now empties the database's write-ahead log when it is done. A refresh
+  applies the archive rule, which clears the text of old articles; that text could
+  stay in the log until the cleanup that runs every six hours.
+- The SVG drawing code now draws nothing outside the helper process, so a later
+  change cannot call it in the app by mistake.
+- The release build now passes `--locked` to `cargo build` itself, not only to the
+  tests that run before it.
+
+### Fixed
+- The audio server on 127.0.0.1 (Linux and the BSDs) answered a request without
+  `Range` for a file smaller than 2 MB with `206` instead of `200`.
+
 ## [0.9.4] - 2026-11-11
 
 ### Security
@@ -380,7 +560,16 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/melsiddieg/tidings/compare/v0.14.1...v0.15.0
+[0.14.1]: https://github.com/melsiddieg/tidings/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/melsiddieg/tidings/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/melsiddieg/tidings/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/melsiddieg/tidings/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/melsiddieg/tidings/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/melsiddieg/tidings/compare/v0.9.6...v0.10.0
+[0.9.6]: https://github.com/melsiddieg/tidings/compare/v0.9.5...v0.9.6
+[0.9.5]: https://github.com/melsiddieg/tidings/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/melsiddieg/tidings/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/melsiddieg/tidings/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/melsiddieg/tidings/compare/v0.9.1...v0.9.2

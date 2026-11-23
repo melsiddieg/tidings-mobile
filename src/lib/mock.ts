@@ -1,6 +1,6 @@
 // Fake backend for `npm run dev` in a normal browser (UI work only).
 // It is loaded only in development and never ships in release builds.
-import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Scope, Settings } from './types';
+import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Rule, SavedSearch, Scope, Settings, Translation, TranslationBlock } from './types';
 
 type Handler = (p: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
@@ -30,7 +30,7 @@ function feed(id: number, folderId: number | null, title: string, url: string, e
     description: null, position: 100 + id, iconVersion: null, updateInterval: null, retentionMode: null,
     retentionValue: null, fullText: false, paused: false, lastFetched: now - 600, lastSuccess: now - 600,
     lastError: null, unread: 0, total: 0, pinned: 0, feedType: 'article', typeOverride: null,
-    detectedType: extra.feedType ?? 'article', local: false, ...extra,
+    detectedType: extra.feedType ?? 'article', local: false, createdAt: now - 86_400 * (40 - id * 2), newest: null, ...extra,
   };
 }
 
@@ -105,7 +105,7 @@ for article in feed.unread() {
 <p>There is still work to do, and the roadmap is public. If you want to follow along, the project posts weekly updates, and of course it has an RSS feed.</p>`;
 }
 
-let articles: (ArticleItem & { html: string; full?: string })[] = [];
+let articles: (ArticleItem & { html: string; full?: string; zh?: boolean })[] = [];
 for (let i = 0; i < 64; i++) {
   const f = feeds[i % feeds.length];
   const title = TITLES[i % TITLES.length];
@@ -127,18 +127,49 @@ for (let i = 0; i < 64; i++) {
   });
 }
 
+// A Chinese article, for the Translate button.
+const ZH = [
+  '开源软件正在改变人工智能的发展方式。越来越多的公司选择公开模型的权重，让研究人员可以在自己的电脑上运行它们。',
+  '这种做法降低了门槛，也让隐私更有保障：数据不必离开用户的设备。',
+  '不过，专家也提醒，开放并不等于安全。模型仍然需要仔细评估，才能用在重要的场合。',
+];
+const ZH_EN = [
+  'Open-source software is changing how artificial intelligence develops. More and more companies choose to publish the weights of their models, so researchers can run them on their own computers.',
+  'This lowers the barrier, and it also protects privacy better: the data does not have to leave the user’s device.',
+  'Experts warn, however, that open does not mean safe. Models still need careful evaluation before they are used where it matters.',
+];
+articles.unshift({
+  id: 65, feedId: 1, title: '开源模型改变人工智能的发展', url: 'https://example.com/1/zh-article', author: '李明',
+  excerpt: ZH[0], published: now - 900, isRead: false, isStarred: false, isNew: true, hasEnclosure: false, thumb: null,
+  // Images between the paragraphs, to check that a translation keeps them in place.
+  html: `<p>${ZH[0]}</p><figure><img src="${svgImage(200, 1200, 500)}" alt="模型"></figure><p>${ZH[1]}</p><p><img src="${svgImage(20, 1200, 400)}" alt="设备">${ZH[2]}</p>`,
+  zh: true,
+});
+
+/** translate::layout, simplified: paragraphs in order and the images between them. */
+function mockLayout(html: string): TranslationBlock[] {
+  let index = 0;
+  return [...html.matchAll(/<img[^>]*>|<p>(?:<img[^>]*>)?[^<]+<\/p>/g)].flatMap((m): TranslationBlock[] => {
+    const image = m[0].match(/<img[^>]*>/)?.[0];
+    const text = m[0].startsWith('<p>') ? [{ kind: 'text', index: index++ } as const] : [];
+    return image ? [{ kind: 'image', html: image }, ...text] : text;
+  });
+}
+
 let settings: Settings = {
   refreshInterval: 60, refreshOnStartup: true, retentionMode: 'count', retentionCount: 1000, retentionDays: 90,
   loadImages: true, stripTracking: true, httpsOnly: false, proxy: '',
   userAgent: 'Mozilla/5.0 (compatible; Tidings/0.1; feed reader)', markReadDelay: 0, linkTarget: 'tab',
   theme: 'system', accent: 'ember', readerFont: 'serif', readerSize: 18, viewMode: 'widescreen', dockBadge: true,
-  concurrency: 6, videoPlayer: '', aiProvider: 'ollama', aiEndpoint: '', aiModel: 'qwen3:4b',
+  concurrency: 6, videoPlayer: '', aiProvider: 'ollama', aiEndpoint: '', aiModel: 'qwen3:4b', translateModel: '',
+  translateTo: 'en',
 };
 
 function counts() {
   for (const f of feeds) {
     f.unread = articles.filter((a) => a.feedId === f.id && !a.isRead).length;
     f.total = articles.filter((a) => a.feedId === f.id).length;
+    f.newest = articles.filter((a) => a.feedId === f.id).reduce<number | null>((n, a) => Math.max(n ?? 0, a.published), null);
   }
 }
 
@@ -186,7 +217,61 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
     showingFullText: full && !!a.full, hasFullText: !!a.full,
     enclosureUrl: a.hasEnclosure ? 'https://aphid.fireside.fm/d/1437767933/c91b88f1-e824-4815-bcb8-5227818d6010/280ea95c-b8fc-4dcd-8563-0b3342ac2a54.mp3' : null,
     enclosureType: a.hasEnclosure ? 'audio/mpeg' : null,
+    chinese: !!a.zh,
+    language: a.zh ? 'zh' : '',
+    translationLayout: a.zh || settings.translateTo === 'ar' ? mockLayout(html) : [],
   };
+}
+
+let searches: SavedSearch[] = [
+  { id: 1, title: 'Unread Linux news', state: JSON.stringify({ scope: { kind: 'folder', id: 4 }, filter: 'unread', query: '', dateRange: { preset: 'any' }, typeFilter: null }) },
+];
+
+/** Filter rules: a simplified version of rules.rs (any phrase, as a whole word). */
+let rules: Rule[] = [{ id: 1, enabled: true, feedId: null, folderId: null, field: 'title', words: 'sponsored, crypto*', action: 'delete', hits: 3 }];
+function ruleMatches(r: Rule): typeof articles {
+  const phrases = r.words.toLowerCase().split(/[,，]/).map((p) => p.trim()).filter(Boolean);
+  const test = (text: string) =>
+    phrases.some((p) => new RegExp(`(^|\\W)${p.replace(/\*$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${p.endsWith('*') ? '' : '(\\W|$)'}`, 'i').test(text));
+  return articles.filter((a) => {
+    if (r.feedId != null && a.feedId !== r.feedId) return false;
+    if (r.folderId != null && !inScope(a, { kind: 'folder', id: r.folderId })) return false;
+    if (r.action !== 'star' && a.isStarred) return false;
+    if (r.action === 'read' && a.isRead) return false;
+    const text = r.field === 'title' ? a.title : r.field === 'text' ? `${a.title} ${a.html.replace(/<[^>]+>/g, ' ')}` : r.field === 'author' ? a.author ?? '' : a.url ?? '';
+    return test(text);
+  });
+}
+
+/** The fake model translates one paragraph every 700 ms. Stop and new translations end the one that runs. */
+let translationRun = 0;
+const ZH_AR = [
+  'تغيّر البرمجيات مفتوحة المصدر طريقة تطوّر الذكاء الاصطناعي. تختار شركات أكثر فأكثر نشر أوزان نماذجها، فيستطيع الباحثون تشغيلها على حواسيبهم.',
+  'هذا يخفّض العتبة، ويحمي الخصوصية أيضاً: لا تحتاج البيانات إلى مغادرة جهاز المستخدم.',
+  'لكن الخبراء يحذّرون من أن الانفتاح لا يعني الأمان. ما زالت النماذج تحتاج إلى تقييم دقيق قبل استخدامها حيث يهمّ الأمر.',
+];
+
+async function mockTranslate(id: number, full: boolean, lang: 'en' | 'ar'): Promise<Translation> {
+  const run = ++translationRun;
+  const a = articles.find((x) => x.id === id);
+  if (!a) throw 'Article not found';
+  if (lang === 'en' && !a.zh) throw 'This article is already in English';
+  const model = settings.translateModel || settings.aiModel;
+  // An English article into Arabic: one sentence per paragraph of the article.
+  const count = a.zh ? ZH_EN.length : mockLayout(a.html).filter((b) => b.kind === 'text').length;
+  const paragraphs = a.zh
+    ? lang === 'ar' ? ZH_AR : ZH_EN
+    : Array.from({ length: count }, (_, i) => `هذه ترجمة الفقرة ${i + 1} من المقال إلى العربية، كتبها النموذج المحلي.`);
+  const title = lang === 'ar' ? (a.zh ? 'النماذج المفتوحة تغيّر تطوّر الذكاء الاصطناعي' : `ترجمة: ${a.title}`) : 'Open models change how AI develops';
+  await wait(500);
+  if (run !== translationRun) throw 'The translation was stopped';
+  emit('translation-part', { articleId: id, full, lang, index: null, total: paragraphs.length, text: title });
+  for (let i = 0; i < paragraphs.length; i++) {
+    await wait(500);
+    if (run !== translationRun) throw 'The translation was stopped';
+    emit('translation-part', { articleId: id, full, lang, index: i, total: paragraphs.length, text: paragraphs[i] });
+  }
+  return { title, paragraphs, model, cut: false, lang };
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -275,12 +360,23 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
         if (local && !args.allowLocal) throw `local-network:${host}`;
         // A public page that names a feed on the local network.
         if (host === 'evil.example') return [{ url: 'http://192.168.1.1/feed', title: 'Router', kind: 'RSS', local: true }];
+        // A public Telegram channel (telegram.rs).
+        const channel = String(args.url).match(/(?:t|telegram)\.me\/(?:s\/)?([A-Za-z]\w{2,31})/);
+        if (channel) return [{ url: `https://t.me/s/${channel[1]}`, title: channel[1], kind: 'Telegram', local: false }];
+        // discover::site_feeds: a GitHub project has two feeds.
+        const repo = String(args.url).match(/github\.com\/([\w-]+)\/([\w.-]+)/);
+        if (repo) {
+          return [
+            { url: `https://github.com/${repo[1]}/${repo[2]}/releases.atom`, title: `Release notes from ${repo[2]}`, kind: 'Atom', local: false },
+            { url: `https://github.com/${repo[1]}/${repo[2]}/commits.atom`, title: `Recent Commits to ${repo[2]}:main`, kind: 'Atom', local: false },
+          ];
+        }
         return [{ url: `${local ? 'http' : 'https'}://${String(args.url).replace(/^https?:\/\//, '')}/feed.xml`, title: 'Example Blog', kind: 'RSS', local }];
       }
     case 'add_feed': {
       if (/\/\/(192\.168\.|10\.|127\.)/.test(args.url) && !args.allowLocal) throw `local-network:${new URL(args.url).hostname}`;
       const id = ++nextId;
-      feeds.push(feed(id, args.folderId ?? null, args.title ?? 'New feed', args.url));
+      feeds.push(feed(id, args.folderId ?? null, args.title ?? 'New feed', args.url, { createdAt: Math.floor(Date.now() / 1000) }));
       setTimeout(() => emit('feed-updated', { feedId: id, newArticles: 0, error: null }), 800);
       return id;
     }
@@ -291,6 +387,13 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
         feedType: args.patch.typeOverride ?? f.detectedType,
       });
       return null;
+    }
+    case 'set_feed_type': {
+      const valid = ['podcast', 'video', 'code', 'discussion', 'newsletter', 'article'];
+      if (args.feedType != null && !valid.includes(args.feedType)) throw 'Unknown feed type';
+      const changed = feeds.filter((f) => args.ids.includes(f.id));
+      for (const f of changed) Object.assign(f, { typeOverride: args.feedType, feedType: args.feedType ?? f.detectedType });
+      return changed.length;
     }
     case 'delete_feed':
       feeds.splice(feeds.findIndex((f) => f.id === args.id), 1);
@@ -364,10 +467,59 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       }, 180);
       return total;
     }
+    case 'preview_opml':
+      return {
+        fileName: 'feedly-export.opml', inFile: 64, newFeeds: 11, subscribed: 52, repeated: 2, invalid: 1,
+        newTitles: ['Simon Willison', 'Latent Space', 'Hacker News: Front Page', 'The Pragmatic Engineer', 'Stratechery', 'Interconnects', 'Import AI', 'One Useful Thing'],
+        moveCount: 9,
+        moves: [
+          { title: 'LWN.net', from: 'Technology / Linux & Free Software', to: 'Linux' },
+          { title: 'Planet KDE', from: 'Technology / Linux & Free Software', to: 'Linux' },
+          { title: 'Ars Technica', from: 'Technology', to: 'News / Tech' },
+          { title: 'The Verge', from: 'Technology', to: 'News / Tech' },
+          { title: 'BBC News · World', from: 'World News', to: 'News' },
+          { title: 'Al Jazeera', from: 'World News', to: 'News' },
+          { title: 'Daring Fireball', from: 'No folder', to: 'Blogs' },
+          { title: 'Julia Evans', from: 'No folder', to: 'Blogs' },
+        ],
+        newFoldersKeep: 2, newFoldersFile: 5,
+      };
     case 'import_opml':
-      return { feeds: 0, folders: 0, skipped: 0 };
+      await wait(500);
+      return { feeds: 11, folders: args.layout === 'file' ? 5 : 2, moved: args.layout === 'file' ? 9 : 0, skipped: 55 };
+    case 'cancel_opml_import':
+      return null;
     case 'export_opml':
       return null;
+    case 'backup':
+      await wait(600);
+      return '~/Documents/tidings-backup.tidings';
+    case 'choose_backup': {
+      const live = articles;
+      return {
+        fileName: 'tidings-backup-2026-11-20.tidings',
+        createdAt: now - 86_400,
+        version: '0.10.0',
+        folders: folders.length,
+        feeds: feeds.length,
+        articles: live.length,
+        unread: live.filter((a) => !a.isRead).length,
+        starred: live.filter((a) => a.isStarred).length,
+        rules: rules.length,
+        searches: searches.length,
+        localFeeds: ['nas.local:8080'],
+        proxyNow: settings.proxy,
+        proxyAfter: settings.proxy || 'socks5h://127.0.0.1:9050',
+        offline: null,
+      };
+    }
+    case 'restore_backup':
+      await wait(1500);
+      return { previous: '~/Library/Application Support/org.tidings.reader/tidings-before-restore.db', offline: null };
+    case 'export_starred':
+      if (!articles.some((a) => a.isStarred)) throw 'There are no starred articles to export';
+      await wait(400);
+      return `~/Documents/tidings-starred.${args.format === 'markdown' ? 'md' : 'html'}`;
     case 'get_settings':
       return { ...settings };
     case 'save_settings':
@@ -406,6 +558,59 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'make_brief':
       await wait(2500);
       return structuredClone(mockBrief(args.query, args.title));
+    case 'feed_activity':
+      return feeds.map((f) => {
+        const mine = articles.filter((a) => a.feedId === f.id);
+        // Daring Fireball has gone quiet in this demo.
+        const newest = f.id === 9 ? now - 300 * 86400 : mine.length ? Math.max(...mine.map((a) => a.published)) : null;
+        return { feedId: f.id, newest, articles: mine.length };
+      });
+    case 'count_articles':
+      return query({ ...args.query, offset: 0, limit: 100000 }).length;
+    case 'list_searches':
+      return structuredClone(searches);
+    case 'save_search': {
+      const s = { id: ++nextId, title: String(args.title).trim(), state: args.search };
+      searches.push(s);
+      return structuredClone(s);
+    }
+    case 'rename_search':
+      searches = searches.map((s) => (s.id === args.id ? { ...s, title: String(args.title).trim() } : s));
+      return null;
+    case 'delete_search':
+      searches = searches.filter((s) => s.id !== args.id);
+      return null;
+    case 'list_rules':
+      return structuredClone(rules);
+    case 'save_rule': {
+      const rule = { ...args.rule, words: String(args.rule.words).split(/[,，]/).map((p: string) => p.trim()).filter(Boolean).join(', ') };
+      if (!rule.words) throw 'Enter the words the rule looks for';
+      if (rule.id === 0) rules.push({ ...rule, id: ++nextId, hits: 0 });
+      else rules = rules.map((r) => (r.id === rule.id ? { ...rule, hits: r.hits } : r));
+      return structuredClone(rules.find((r) => r.id === (rule.id || nextId)));
+    }
+    case 'delete_rule':
+      rules = rules.filter((r) => r.id !== args.id);
+      return null;
+    case 'count_rule_matches':
+      await wait(150);
+      return ruleMatches(args.rule).length;
+    case 'apply_rule': {
+      const rule = rules.find((r) => r.id === args.id)!;
+      const hit = ruleMatches(rule);
+      for (const a of hit) {
+        if (rule.action === 'read') a.isRead = true;
+        if (rule.action === 'star') a.isStarred = true;
+      }
+      if (rule.action === 'delete') articles = articles.filter((a) => !hit.includes(a));
+      rule.hits += hit.length;
+      return hit.length;
+    }
+    case 'translate_article':
+      return mockTranslate(args.id, !!args.fullText, args.lang ?? settings.translateTo);
+    case 'stop_translation':
+      translationRun++;
+      return null;
     case 'briefs':
       return briefs.map(({ id, createdAt, title, model }) => ({ id, createdAt, title, model }));
     case 'brief':

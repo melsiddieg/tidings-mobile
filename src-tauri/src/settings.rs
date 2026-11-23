@@ -45,6 +45,12 @@ pub struct Settings {
     pub ai_endpoint: String,
     /// The model's name on that server.
     pub ai_model: String,
+    /// The model that translates articles (translate.rs), on the same server. Empty
+    /// uses `ai_model`.
+    pub translate_model: String,
+    /// The language articles are translated into: "en" (Chinese and Arabic articles)
+    /// or "ar" (articles in any other language).
+    pub translate_to: String,
 }
 
 impl Default for Settings {
@@ -73,6 +79,8 @@ impl Default for Settings {
             ai_provider: String::new(),
             ai_endpoint: String::new(),
             ai_model: String::new(),
+            translate_model: String::new(),
+            translate_to: "en".into(),
         }
     }
 }
@@ -98,6 +106,7 @@ impl Settings {
         self.reader_font = pick(&self.reader_font, &["serif", "sans", "mono"], "serif");
         self.reader_size = self.reader_size.clamp(13, 28);
         self.view_mode = pick(&self.view_mode, &["widescreen", "normal", "combined"], "widescreen");
+        self.translate_to = pick(&self.translate_to, &["en", "ar"], "en");
         self.concurrency = self.concurrency.clamp(1, 16);
 
         self.proxy = self.proxy.trim().to_string();
@@ -127,8 +136,11 @@ impl Settings {
             self.ai_provider = String::new();
         }
         self.ai_model = self.ai_model.trim().to_string();
-        if self.ai_model.chars().any(|c| c.is_control()) || self.ai_model.len() > 300 {
-            return Err(Error::msg("The model name contains invalid characters"));
+        self.translate_model = self.translate_model.trim().to_string();
+        for model in [&self.ai_model, &self.translate_model] {
+            if model.chars().any(|c| c.is_control()) || model.len() > 300 {
+                return Err(Error::msg("The model name contains invalid characters"));
+            }
         }
         self.ai_endpoint = self.ai_endpoint.trim().trim_end_matches('/').to_string();
         if !self.ai_endpoint.is_empty() {
@@ -192,6 +204,28 @@ pub fn load(conn: &Connection) -> Loaded {
     }
 }
 
+/// The settings of a backup being restored (backup.rs): `json` is its saved
+/// settings, None when it has none. If they cannot be read, the current ones stay.
+///
+/// Restoring never weakens what protects this computer now. A proxy in use stays,
+/// and "HTTPS only" and removing trackers stay on: the backup may come from a time
+/// or a computer without them, and restoring it must not start direct connections
+/// (Tor). The video player stays too: it names a program on this computer, and a
+/// backup file must not choose which program Tidings starts.
+pub fn restored(json: Option<&str>, current: &Settings) -> Loaded {
+    let Some(saved) = json.and_then(|json| serde_json::from_str::<Settings>(json).ok()) else {
+        return Loaded { settings: current.clone(), offline: None };
+    };
+    let merged = Settings {
+        proxy: if current.proxy.is_empty() { saved.proxy.clone() } else { current.proxy.clone() },
+        https_only: saved.https_only || current.https_only,
+        strip_tracking: saved.strip_tracking || current.strip_tracking,
+        video_player: current.video_player.clone(),
+        ..saved
+    };
+    merged.repaired()
+}
+
 impl Settings {
     /// Saved settings that no longer pass `validated` (a rule changed, or the row was
     /// edited). Never falls back to all defaults: that would drop the proxy. Other
@@ -205,6 +239,7 @@ impl Settings {
             ai_provider: defaults.ai_provider,
             ai_endpoint: defaults.ai_endpoint,
             ai_model: defaults.ai_model,
+            translate_model: defaults.translate_model,
             video_player: defaults.video_player,
             user_agent: defaults.user_agent,
             ..self

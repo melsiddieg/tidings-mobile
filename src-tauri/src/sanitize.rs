@@ -112,7 +112,8 @@ fn builder<'a>() -> Builder<'a> {
 /// Cleans feed or page HTML before it is stored.
 /// Relative links are made absolute using `base`.
 pub fn clean(html: &str, base: Option<&Url>, strip_tracking: bool) -> String {
-    let prepared = preprocess(html, base);
+    let html = bounded(html);
+    let prepared = preprocess(&html, base);
     let mut b = builder();
     b.url_relative(match base {
         Some(base) => UrlRelative::RewriteWithBase(base.clone()),
@@ -269,7 +270,8 @@ pub fn text_to_html(text: &str) -> String {
 
 /// Plain text from HTML, with whitespace collapsed.
 pub fn plain_text(html: &str) -> String {
-    let doc = Document::fragment(html);
+    let html = bounded(html);
+    let doc = Document::fragment(html.as_ref());
     let text = doc.root().formatted_text();
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -309,6 +311,8 @@ pub struct Rendered {
 /// Prepares stored HTML for display. Images are either routed through the
 /// local image proxy or removed. The HTML is cleaned again as a second line of defense.
 pub fn render(html: &str, load_images: bool) -> Rendered {
+    // Articles stored by older versions were not checked for depth.
+    let html = bounded(html);
     let images = html.matches("<img").count();
     let mut b = builder();
     b.url_relative(UrlRelative::Deny);
@@ -324,9 +328,22 @@ pub fn render(html: &str, load_images: bool) -> Rendered {
         b.rm_tags(["img"]);
     }
     Rendered {
-        html: b.clean(html).to_string(),
+        html: b.clean(&html).to_string(),
         blocked_images: if load_images { 0 } else { images },
     }
+}
+
+/// Prepares stored HTML for a file the user saves (export.rs). It is cleaned again
+/// like for display, but without the image proxy, which works only inside Tidings:
+/// images keep their web address, or are removed when `images` is false.
+pub fn export(html: &str, images: bool) -> String {
+    let html = bounded(html);
+    let mut b = builder();
+    b.url_relative(UrlRelative::Deny);
+    if !images {
+        b.rm_tags(["img"]);
+    }
+    b.clean(&html).to_string()
 }
 
 /// Stable 64-bit FNV-1a hash, used to detect changed articles.
@@ -341,9 +358,648 @@ pub fn hash(parts: &[&str]) -> i64 {
     h as i64
 }
 
+// ---------------------------------------------------------------------------
+// Nesting depth
+// ---------------------------------------------------------------------------
+//
+// An HTML parser looks through the elements that are still open for each new
+// element, so its time grows with the square of the nesting depth: 50,000 nested
+// `<div>` (550 KB) took 19 seconds to clean and show. `too_deep` finds such HTML
+// in one pass over the tags, before any parser builds a tree, and `bounded` then
+// keeps only its text.
+//
+// The pass follows the HTML tokenizer exactly (quotes, comments, script, CDATA),
+// and the parser's tree rules where they close elements. Where it cannot follow
+// them, it keeps elements open: it may count too deep, never too shallow.
+
+/// Elements nest at most this deep. Articles stay far below it; WebKit itself
+/// stops nesting at 512.
+const MAX_DEPTH: usize = 200;
+/// Feed and page HTML is cut at this length before it is parsed.
+const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
+
+/// Elements without content.
+const VOID: &[&str] = &[
+    "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "image", "img", "input",
+    "keygen", "link", "meta", "param", "source", "track", "wbr",
+];
+/// Elements whose end tag may be left out. The parser closes one when the next one
+/// starts, so they do not nest by themselves. They are not counted; a table counts
+/// for the body, row and cell that the parser adds inside it.
+const UNNESTED: &[&str] = &[
+    "caption", "colgroup", "dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc", "tbody",
+    "td", "tfoot", "th", "thead", "tr",
+];
+/// The parser's "special" elements: the end tag of an ordinary element stops at them.
+const SPECIAL: &[&str] = &[
+    "address", "annotation-xml", "applet", "area", "article", "aside", "base", "basefont", "bgsound",
+    "blockquote", "body", "br", "button", "caption", "center", "col", "colgroup", "dd", "desc", "details",
+    "dir", "div", "dl", "dt", "embed", "fieldset", "figcaption", "figure", "footer", "foreignobject", "form",
+    "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html",
+    "iframe", "img", "input", "keygen", "li", "link", "listing", "main", "marquee", "menu", "meta", "mi",
+    "mn", "mo", "ms", "mtext", "nav", "noembed", "noframes", "noscript", "object", "ol", "p", "param",
+    "plaintext", "pre", "script", "search", "section", "select", "source", "style", "summary", "table",
+    "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr", "xmp",
+];
+/// The end tag of a special element stops at these ("scope").
+const SCOPE: &[&str] = &[
+    "annotation-xml", "applet", "caption", "desc", "foreignobject", "html", "marquee", "mi", "mn", "mo", "ms",
+    "mtext", "object", "table", "td", "template", "th", "title",
+];
+/// HTML elements that end SVG or MathML content when they start inside it.
+const BREAKOUT: &[&str] = &[
+    "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed", "font",
+    "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol",
+    "p", "pre", "ruby", "s", "small", "span", "strike", "strong", "sub", "sup", "table", "tt", "u", "ul", "var",
+];
+/// SVG and MathML elements whose content is HTML again.
+const INTEGRATION: &[&str] = &["annotation-xml", "desc", "foreignobject", "mi", "mn", "mo", "ms", "mtext", "title"];
+
+enum Token<'a> {
+    Text(&'a str),
+    /// A start tag; `closed` when it ends with `/>`.
+    Start { name: String, closed: bool },
+    End(String),
+}
+
+/// The tags and text of HTML, read the way the HTML tokenizer reads them.
+struct Tokens<'a> {
+    html: &'a str,
+    at: usize,
+    /// Where the last start tag begins (`Tokens::last_tag`).
+    tag: usize,
+    /// Whether `<![CDATA[` starts a CDATA section (inside SVG or MathML).
+    cdata: bool,
+}
+
+fn is_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
+}
+
+/// Whether `b[at..]` starts with `word` (any case) and then a space, `/` or `>`.
+fn word_at(b: &[u8], at: usize, word: &str) -> bool {
+    let end = at + word.len();
+    b.len() > end && b[at..end].eq_ignore_ascii_case(word.as_bytes()) && (is_space(b[end]) || matches!(b[end], b'/' | b'>'))
+}
+
+/// Reads a tag from its name at `start` to its `>`: the end of the name, whether
+/// it ends with `/>`, and where the tag ends. A quote starts a value only after
+/// `=`, as in the tokenizer. None when the HTML ends inside the tag.
+fn read_tag(b: &[u8], start: usize) -> Option<(usize, bool, usize)> {
+    let mut i = start;
+    while i < b.len() && !is_space(b[i]) && !matches!(b[i], b'/' | b'>') {
+        i += 1;
+    }
+    let name_end = i;
+    loop {
+        while i < b.len() && is_space(b[i]) {
+            i += 1;
+        }
+        match *b.get(i)? {
+            b'>' => return Some((name_end, false, i + 1)),
+            b'/' => {
+                if *b.get(i + 1)? == b'>' {
+                    return Some((name_end, true, i + 2));
+                }
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        // An attribute name; its first character may be `=`.
+        i += 1;
+        while i < b.len() && !is_space(b[i]) && !matches!(b[i], b'/' | b'>' | b'=') {
+            i += 1;
+        }
+        while i < b.len() && is_space(b[i]) {
+            i += 1;
+        }
+        if *b.get(i)? != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < b.len() && is_space(b[i]) {
+            i += 1;
+        }
+        match *b.get(i)? {
+            quote @ (b'"' | b'\'') => i += b[i + 1..].iter().position(|&c| c == quote)? + 2,
+            b'>' => return Some((name_end, false, i + 1)),
+            _ => {
+                while i < b.len() && !is_space(b[i]) && b[i] != b'>' {
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Where a comment that starts at `from` (after `<!--`) ends: after `-->` or `--!>`.
+fn comment_end(b: &[u8], from: usize) -> usize {
+    if b.get(from) == Some(&b'>') {
+        return from + 1;
+    }
+    if b[from.min(b.len())..].starts_with(b"->") {
+        return from + 2;
+    }
+    let mut k = from;
+    while k < b.len() {
+        if b[k] == b'-' {
+            if b[k + 1..].starts_with(b"->") {
+                return k + 3;
+            }
+            if b[k + 1..].starts_with(b"-!>") {
+                return k + 4;
+            }
+        }
+        k += 1;
+    }
+    b.len()
+}
+
+impl<'a> Tokens<'a> {
+    fn new(html: &'a str) -> Self {
+        Tokens { html, at: 0, tag: 0, cdata: false }
+    }
+
+    /// The last start tag as it is written, from `<` to `>`.
+    fn last_tag(&self) -> &'a str {
+        &self.html[self.tag..self.at]
+    }
+
+    fn name(&self, from: usize, to: usize) -> String {
+        String::from_utf8_lossy(&self.html.as_bytes()[from..to]).to_ascii_lowercase()
+    }
+
+    /// Moves past the end tag whose name starts at `from`.
+    fn skip_tag(&mut self, from: usize) {
+        self.at = read_tag(self.html.as_bytes(), from).map_or(self.html.len(), |(_, _, end)| end);
+    }
+
+    /// Moves past the text of `<style>`, `<textarea>` and the like, and its end tag.
+    fn skip_raw(&mut self, name: &str) {
+        let b = self.html.as_bytes();
+        let mut i = self.at;
+        while let Some(k) = b[i..].iter().position(|&c| c == b'<') {
+            i += k;
+            if b.get(i + 1) == Some(&b'/') && word_at(b, i + 2, name) {
+                return self.skip_tag(i + 2);
+            }
+            i += 1;
+        }
+        self.at = b.len();
+    }
+
+    /// Moves past a script and its end tag. Inside `<!--` in a script, `<script>`
+    /// hides the next `</script>` from the tokenizer.
+    fn skip_script(&mut self) {
+        let b = self.html.as_bytes();
+        let (mut i, mut escaped, mut double, mut dashes) = (self.at, false, false, 0usize);
+        while i < b.len() {
+            let c = b[i];
+            if escaped {
+                if c == b'-' {
+                    dashes += 1;
+                    i += 1;
+                    continue;
+                }
+                if c == b'>' && dashes >= 2 {
+                    (escaped, double) = (false, false);
+                }
+                dashes = 0;
+            }
+            if c == b'<' {
+                let slash = b.get(i + 1) == Some(&b'/');
+                if !double && slash && word_at(b, i + 2, "script") {
+                    return self.skip_tag(i + 2);
+                }
+                if !escaped && b[i + 1..].starts_with(b"!--") {
+                    (escaped, dashes) = (true, 2);
+                    i += 4;
+                    continue;
+                }
+                if escaped && !double && word_at(b, i + 1, "script") {
+                    double = true;
+                } else if double && slash && word_at(b, i + 2, "script") {
+                    double = false;
+                }
+            }
+            i += 1;
+        }
+        self.at = b.len();
+    }
+
+    fn next(&mut self) -> Option<Token<'a>> {
+        let b = self.html.as_bytes();
+        loop {
+            let start = self.at;
+            if start >= b.len() {
+                return None;
+            }
+            // Text runs to the next `<` that starts markup.
+            let mut i = start;
+            loop {
+                match b[i..].iter().position(|&c| c == b'<') {
+                    None => {
+                        self.at = b.len();
+                        return Some(Token::Text(&self.html[start..]));
+                    }
+                    Some(k) => i += k,
+                }
+                match b.get(i + 1) {
+                    Some(c) if c.is_ascii_alphabetic() || matches!(c, b'/' | b'!' | b'?') => break,
+                    _ => i += 1,
+                }
+            }
+            if i > start {
+                self.at = i;
+                return Some(Token::Text(&self.html[start..i]));
+            }
+            let rest = &b[i..];
+            if rest.starts_with(b"<!--") {
+                self.at = comment_end(b, i + 4);
+            } else if self.cdata && rest.starts_with(b"<![CDATA[") {
+                self.at = find(b, i + 9, b"]]>").map_or(b.len(), |k| k + 3);
+            } else if rest[1] == b'!' || rest[1] == b'?' {
+                self.at = find(b, i + 2, b">").map_or(b.len(), |k| k + 1);
+            } else if rest[1] == b'/' {
+                match b.get(i + 2) {
+                    Some(c) if c.is_ascii_alphabetic() => {
+                        let Some((name_end, _, end)) = read_tag(b, i + 2) else {
+                            self.at = b.len();
+                            return None;
+                        };
+                        self.at = end;
+                        return Some(Token::End(self.name(i + 2, name_end)));
+                    }
+                    Some(b'>') => self.at = i + 3,
+                    Some(_) => self.at = find(b, i + 2, b">").map_or(b.len(), |k| k + 1),
+                    None => {
+                        self.at = b.len();
+                        return Some(Token::Text(&self.html[i..]));
+                    }
+                }
+            } else {
+                let Some((name_end, closed, end)) = read_tag(b, i + 1) else {
+                    self.at = b.len();
+                    return None;
+                };
+                self.at = end;
+                self.tag = i;
+                return Some(Token::Start { name: self.name(i + 1, name_end), closed });
+            }
+        }
+    }
+}
+
+fn find(b: &[u8], from: usize, what: &[u8]) -> Option<usize> {
+    b.get(from..)?.windows(what.len()).position(|w| w == what).map(|k| from + k)
+}
+
+struct Open {
+    name: String,
+    /// An SVG or MathML element.
+    foreign: bool,
+    /// One whose content is HTML again (see `INTEGRATION`).
+    integration: bool,
+    weight: usize,
+}
+
+/// Which open element the end tag `name` closes, with all after it: the last one
+/// of that name, unless the parser would stop before it. None when it closes nothing.
+fn closes(open: &[Open], name: &str) -> Option<usize> {
+    let stops_at = if SPECIAL.contains(&name) { SCOPE } else { SPECIAL };
+    for (at, element) in open.iter().enumerate().rev() {
+        if element.name == name {
+            return Some(at);
+        }
+        let passed = element.foreign && !element.integration;
+        if !passed && stops_at.contains(&element.name.as_str()) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether the elements in `html` nest deeper than `MAX_DEPTH`. `<noscript>` holds
+/// text for a parser with scripting on and markup for one without: both are checked.
+pub fn too_deep(html: &str) -> bool {
+    deeper_than(html, MAX_DEPTH, true) || deeper_than(html, MAX_DEPTH, false)
+}
+
+fn deeper_than(html: &str, max: usize, noscript_is_text: bool) -> bool {
+    let mut open: Vec<Open> = Vec::new();
+    let mut depth = 0;
+    let mut tokens = Tokens::new(html);
+    loop {
+        tokens.cdata = open.last().is_some_and(|e| e.foreign);
+        let Some(token) = tokens.next() else { return false };
+        match token {
+            Token::Text(_) => {}
+            Token::End(name) => {
+                if let Some(at) = closes(&open, &name) {
+                    depth -= open[at..].iter().map(|e| e.weight).sum::<usize>();
+                    open.truncate(at);
+                }
+            }
+            Token::Start { name, closed } => {
+                let in_foreign = open.last().is_some_and(|e| e.foreign && !e.integration);
+                let foreign = |name: String| Open { integration: INTEGRATION.contains(&name.as_str()), foreign: true, weight: 1, name };
+                if in_foreign && !BREAKOUT.contains(&name.as_str()) {
+                    // An SVG or MathML element: `/>` closes it.
+                    if !closed {
+                        open.push(foreign(name));
+                        depth += 1;
+                    }
+                } else {
+                    // An HTML element ends SVG or MathML content.
+                    while open.last().is_some_and(|e| e.foreign && !e.integration) {
+                        depth -= open.pop().map_or(0, |e| e.weight);
+                    }
+                    match name.as_str() {
+                        "svg" | "math" if !closed => {
+                            open.push(foreign(name));
+                            depth += 1;
+                        }
+                        "svg" | "math" => {}
+                        "script" => tokens.skip_script(),
+                        "style" | "xmp" | "iframe" | "noembed" | "noframes" | "textarea" | "title" => tokens.skip_raw(&name),
+                        "noscript" if noscript_is_text => tokens.skip_raw(&name),
+                        // Everything after it is text.
+                        "plaintext" => return false,
+                        n if VOID.contains(&n) || UNNESTED.contains(&n) => {}
+                        _ => {
+                            let weight = if name == "table" { 4 } else { 1 };
+                            open.push(Open { name, foreign: false, integration: false, weight });
+                            depth += weight;
+                        }
+                    }
+                }
+            }
+        }
+        if depth > max {
+            return true;
+        }
+    }
+}
+
+/// Elements that start and end a paragraph of text (`flatten`, `pieces`).
+const BLOCKS: &[&str] = &[
+    "address", "article", "aside", "blockquote", "br", "dd", "details", "div", "dl", "dt", "figcaption", "figure",
+    "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+    "summary", "table", "td", "th", "tr", "ul",
+];
+
+/// Marks the place of an image in the text of `block_text`. Text never holds `<`
+/// before a letter (that starts a tag), so the mark cannot come from the text.
+const IMAGE_MARK: &str = "<img>";
+
+/// The text of `html`, with "\n\n" where a block element starts or ends. The text
+/// keeps its character references (`&amp;`). With `images`, each image tag is added
+/// there as it is written, and its place in the text marked with `IMAGE_MARK`.
+fn block_text(html: &str, mut images: Option<&mut Vec<String>>) -> String {
+    let mut text = String::new();
+    let mut tokens = Tokens::new(html);
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Text(t) => text.push_str(t),
+            Token::Start { name, .. } => match name.as_str() {
+                "script" => tokens.skip_script(),
+                "style" | "noscript" | "template" | "iframe" | "noembed" | "noframes" | "xmp" | "textarea" | "title" => {
+                    tokens.skip_raw(&name)
+                }
+                "img" => {
+                    if let Some(list) = images.as_mut() {
+                        text.push_str(IMAGE_MARK);
+                        list.push(tokens.last_tag().to_string());
+                    }
+                }
+                n if BLOCKS.contains(&n) => text.push_str("\n\n"),
+                _ => {}
+            },
+            Token::End(name) if BLOCKS.contains(&name.as_str()) => text.push_str("\n\n"),
+            Token::End(_) => {}
+        }
+    }
+    text
+}
+
+/// A paragraph of `block_text` on one line, as HTML: only `<` and `>` could start markup.
+fn paragraph_html(text: &str) -> Option<String> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then(|| format!("<p>{}</p>", line.replace('<', "&lt;").replace('>', "&gt;")))
+}
+
+/// The text of `html` as paragraphs, for HTML that nests too deep to parse.
+fn flatten(html: &str) -> String {
+    block_text(html, None).split("\n\n").filter_map(paragraph_html).collect()
+}
+
+/// The text of HTML without its markup, in one pass over the tags and without
+/// building a tree: fast enough to run on every stored article (filter rules).
+/// Character references are decoded; scripts and styles are left out.
+pub fn quick_text(html: &str) -> String {
+    let mut end = html.len().min(MAX_HTML_BYTES);
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Tags inside a line of text: they do not separate words.
+    const INLINE: &[&str] = &[
+        "a", "abbr", "b", "bdi", "bdo", "cite", "code", "del", "dfn", "em", "font", "i", "ins", "kbd", "mark", "q",
+        "s", "samp", "small", "span", "strike", "strong", "sub", "sup", "time", "u", "var",
+    ];
+    let mut out = String::new();
+    let mut tokens = Tokens::new(&html[..end]);
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Text(text) => decode_into(&mut out, text),
+            Token::Start { name, .. } => match name.as_str() {
+                "script" => {
+                    tokens.skip_script();
+                    out.push(' ');
+                }
+                "style" | "noscript" | "template" | "textarea" | "title" | "xmp" | "iframe" => {
+                    tokens.skip_raw(&name);
+                    out.push(' ');
+                }
+                n if INLINE.contains(&n) => {}
+                _ => out.push(' '),
+            },
+            Token::End(name) if INLINE.contains(&name.as_str()) => {}
+            Token::End(_) => out.push(' '),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Appends `text` with its character references (`&amp;`, `&#20013;`) decoded.
+/// Named references other than the common ones stay as they are.
+fn decode_into(out: &mut String, text: &str) {
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let end = rest[1..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '#')).map(|i| i + 1);
+        let reference = end.filter(|&e| rest[e..].starts_with(';')).map(|e| &rest[1..e]);
+        let decoded = reference.and_then(|r| match r {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            _ => {
+                let number = r.strip_prefix('#')?;
+                let code = match number.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                    None => number.parse().ok()?,
+                };
+                char::from_u32(code)
+            }
+        });
+        match (decoded, reference) {
+            (Some(c), Some(r)) => {
+                out.push(c);
+                rest = &rest[r.len() + 2..];
+            }
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+}
+
+/// The text of cleaned HTML as paragraphs of plain text, for translation. Headings,
+/// list items and table cells become paragraphs of their own; images and links go.
+pub fn paragraphs(html: &str) -> Vec<String> {
+    pieces(html)
+        .into_iter()
+        .filter_map(|piece| match piece {
+            Piece::Text(text) => Some(text),
+            Piece::Image(_) => None,
+        })
+        .collect()
+}
+
+/// A part of an article for a translation (`pieces`).
+#[derive(Debug, PartialEq)]
+pub enum Piece {
+    /// A paragraph of plain text, as `paragraphs` returns it.
+    Text(String),
+    /// An image tag as it is written in the stored HTML. Show it only through `render`.
+    Image(String),
+}
+
+/// The paragraphs of `html` as `paragraphs` returns them, with its images between
+/// them. An image inside a paragraph comes before it when no text is before the
+/// image there, else after it. The text is exactly that of `paragraphs` in 0.10 and
+/// 0.11, so a stored translation keeps the index of each paragraph.
+pub fn pieces(html: &str) -> Vec<Piece> {
+    enum Entry {
+        Paragraph,
+        Image(usize),
+    }
+    let html = bounded(html);
+    let mut images = Vec::new();
+    let text = block_text(&html, Some(&mut images));
+    let mut entries = Vec::new();
+    let mut flat = String::new();
+    let mut next = 0;
+    for chunk in text.split("\n\n") {
+        let mut parts = chunk.split(IMAGE_MARK);
+        let mut joined = parts.next().unwrap_or_default().to_string();
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for part in parts {
+            if joined.trim().is_empty() { before.push(next) } else { after.push(next) }
+            next += 1;
+            joined.push_str(part);
+        }
+        entries.extend(before.into_iter().map(Entry::Image));
+        if let Some(p) = paragraph_html(&joined) {
+            flat.push_str(&p);
+            entries.push(Entry::Paragraph);
+        }
+        entries.extend(after.into_iter().map(Entry::Image));
+    }
+    // One parse decodes the character references of all paragraphs.
+    let doc = Document::fragment(flat.as_str());
+    let mut texts = doc.select("p").iter().map(|p| p.text().split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().into_iter();
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Entry::Paragraph => texts.next().filter(|t| !t.is_empty()).map(Piece::Text),
+            Entry::Image(k) => images.get_mut(k).map(|tag| Piece::Image(std::mem::take(tag))),
+        })
+        .collect()
+}
+
+/// Feed or page HTML that is safe to parse: cut at `MAX_HTML_BYTES`, and only its
+/// text when its elements nest deeper than `MAX_DEPTH`.
+fn bounded(html: &str) -> Cow<'_, str> {
+    let mut end = html.len().min(MAX_HTML_BYTES);
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    let html = &html[..end];
+    if too_deep(html) {
+        Cow::Owned(flatten(html))
+    } else {
+        Cow::Borrowed(html)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `paragraphs` in 0.10 and 0.11. Stored translations number their paragraphs this way.
+    fn paragraphs_0_11(html: &str) -> Vec<String> {
+        let html = bounded(html);
+        let flat = flatten(&html);
+        let doc = Document::fragment(flat.as_str());
+        doc.select("p")
+            .iter()
+            .map(|p| p.text().split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn pieces_keep_images_in_place() {
+        let image = |name: &str| Piece::Image(format!(r#"<img src="https://img.example/{name}.jpg">"#));
+        let text = |t: &str| Piece::Text(t.to_string());
+        let html = r#"<h1>标题</h1><p>第一段&amp;文字。</p><figure><img src="https://img.example/a.jpg"><figcaption>图片说明</figcaption></figure>
+            <p>第二段<img src="https://img.example/b.jpg">继续。</p><ul><li>一</li><li>二</li></ul>
+            <p><a href="https://example.com/"><img src="https://img.example/c.jpg"></a>链接下的说明</p>"#;
+        assert_eq!(
+            pieces(html),
+            [text("标题"), text("第一段&文字。"), image("a"), text("图片说明"), text("第二段继续。"), image("b"), text("一"), text("二"), image("c"), text("链接下的说明")]
+        );
+        // Only real images: not in a comment, a script, `<noscript>` or the text.
+        let hidden = r#"<!-- <img src="https://img.example/x.jpg"> --><script>document.write("<img src=x>")</script>
+            <noscript><img src="https://img.example/y.jpg"></noscript><p>文字 &lt;img&gt; 不是图片</p>"#;
+        assert_eq!(pieces(hidden), [text("文字 <img> 不是图片")]);
+        // HTML that nests too deep keeps only its text.
+        let deep = format!("{}深层文字<img src=\"https://img.example/d.jpg\">", "<div>".repeat(300));
+        assert_eq!(pieces(&deep), [text("深层文字")]);
+    }
+
+    #[test]
+    fn paragraphs_are_numbered_as_before() {
+        let samples = [
+            r#"<h1>标题</h1><p>第一段&amp;文字。</p><figure><img src="https://img.example/a.jpg"><figcaption>说明</figcaption></figure><p>第二段<img src="x.png">继续。</p>"#,
+            "<p>一段\n\n两行</p><p>&nbsp;</p><p>   </p><br>尾巴",
+            "<div>甲<span>乙</span><div>丙</div>丁</div><table><tr><td>格一</td><td>格二</td></tr></table>",
+            "<p>a < b and c > d &lt;p&gt; &copy; &#x4E2D;</p><pre>code\n  block</pre><style>p{}</style><textarea><p>no</p></textarea>",
+            "<blockquote><p>引用</p></blockquote><dl><dt>词</dt><dd>义</dd></dl><details><summary>摘要</summary>内容</details>",
+            "",
+        ];
+        let deep = format!("{}深<img src=\"a.png\">层", "<div>".repeat(300));
+        for html in samples.iter().copied().chain([deep.as_str()]) {
+            assert_eq!(paragraphs(html), paragraphs_0_11(html), "{html}");
+        }
+    }
 
     #[test]
     fn removes_scripts_and_handlers() {
@@ -393,6 +1049,106 @@ mod tests {
         assert!(out.contains("https://example.com/real.jpg"));
         assert!(!out.contains("pixel.wp.com"));
         assert!(!out.contains("p.gif"));
+    }
+
+    /// The report on 0.9.5: 50,000 nested `<div>` took 19 seconds to clean and show.
+    #[test]
+    fn deep_nesting_is_shown_as_text() {
+        let deep = format!("{}<b>Deep</b> text &amp; more{}", "<div>".repeat(50_000), "</div>".repeat(50_000));
+        let started = std::time::Instant::now();
+        assert!(too_deep(&deep));
+        let out = clean(&deep, None, false);
+        assert_eq!(out, "<p>Deep text &amp; more</p>");
+        assert_eq!(render(&deep, true).html, out);
+        assert_eq!(plain_text(&deep), "Deep text & more");
+        eprintln!("50,000 nested elements: {:?}", started.elapsed());
+
+        // Text keeps its paragraphs; scripts and styles are dropped; `<` stays text.
+        let deep = format!("{}<p>One < two</p><script>x()</script><style>p{{}}</style><p>Three</p>", "<span>".repeat(300));
+        assert_eq!(clean(&deep, None, false), "<p>One &lt; two</p><p>Three</p>");
+    }
+
+    #[test]
+    fn ordinary_html_is_not_too_deep() {
+        let wide = [
+            // 150 levels: below the limit.
+            format!("{}x{}", "<div>".repeat(150), "</div>".repeat(150)),
+            // Elements whose end tag may be left out do not nest.
+            "<p>a".repeat(1000),
+            format!("<ul>{}</ul>", "<li>a".repeat(1000)),
+            format!("<table>{}</table>", "<tr><td>a<td>b".repeat(1000)),
+            format!("<dl>{}</dl>", "<dt>a<dd>b".repeat(1000)),
+            // Unclosed inline elements, closed by the block around them.
+            "<div><span>a<em>b</div>".repeat(1000),
+            // An inline SVG: `/>` closes its elements, `</svg>` closes the rest.
+            format!("<svg>{}</svg>", "<path d='M0 0'/><g><rect/></g>".repeat(1000)),
+            // Markup inside comments, scripts, styles and text areas is not markup.
+            format!("<!--{}-->", "<div>".repeat(1000)),
+            format!("<div><!-- a --!>{}</div>", "<b>x</b>".repeat(1000)),
+            format!("<script>{}</script>", "<div>".repeat(1000)),
+            format!("<script><!--<script></script>{}--></script>", "<div>".repeat(1000)),
+            format!("<style>{}</style>", "<div>".repeat(1000)),
+            format!("<textarea>{}</textarea>", "<div>".repeat(1000)),
+            format!("<title>{}</title>", "<div>".repeat(1000)),
+            // Attribute values may hold `>` and quotes.
+            r#"<div title="a > b" data-x='"'>x</div>"#.repeat(1000),
+            // After <plaintext> everything is text.
+            format!("<plaintext>{}", "<div>".repeat(1000)),
+        ];
+        for html in wide {
+            assert!(!too_deep(&html), "{}", &html[..80.min(html.len())]);
+        }
+    }
+
+    /// HTML that a parser nests deeply, though a simpler reading of its tags would not.
+    #[test]
+    fn hidden_nesting_is_found() {
+        let deep = [
+            "<div/>".repeat(300),
+            // A quote in an attribute name does not start a value.
+            r#"<div a"b>"#.repeat(300),
+            // `</span>` cannot close a <span> that has a <div> open inside it.
+            "<span><div></span>".repeat(300),
+            // `->` does not end a comment.
+            "<div><!-- -> </div> -->".repeat(300),
+            // Inside `<!--` in a script, `<script>` hides the next `</script>`.
+            "<div><script><!--<script></script></div>--></script>".repeat(300),
+            // With scripting on, <noscript> holds text.
+            "<div><noscript></div></noscript>".repeat(300),
+            "<div><textarea></div></textarea>".repeat(300),
+            // In SVG, CDATA is text.
+            format!("<svg>{}", "<g><![CDATA[></g>]]>".repeat(300)),
+            // Inside <foreignObject> it is HTML again, where `/>` closes nothing.
+            format!("<svg><foreignObject>{}", "<section/>".repeat(300)),
+            // Each table adds a body, a row and a cell.
+            "<table><tr><td>".repeat(60),
+            "<b>".repeat(300),
+        ];
+        for html in deep {
+            assert!(too_deep(&html), "{}", &html[..80.min(html.len())]);
+        }
+    }
+
+    #[test]
+    fn quick_text_reads_text_only() {
+        assert_eq!(quick_text("<p>Fish &amp; chips</p><p>&#20013;&#x6587; &nbsp;x</p>"), "Fish & chips 中文 x");
+        assert_eq!(quick_text("<p>a</p>b<script>c</script><style>d</style>e<br>f"), "a b e f");
+        // Inline tags do not split a word.
+        assert_eq!(quick_text("<p>Bit<b>coin</b> news</p>"), "Bitcoin news");
+        // Not a reference, or one that is not known: kept as written.
+        assert_eq!(quick_text("AT&T &copy; &#xZZ; & end&"), "AT&T &copy; &#xZZ; & end&");
+        assert_eq!(quick_text("<a href='x'>link</a> 1 < 2"), "link 1 < 2");
+    }
+
+    #[test]
+    fn long_html_is_cut() {
+        let long = format!("<p>{}</p>", "word ".repeat(1_000_000));
+        let out = clean(&long, None, false);
+        assert!(out.len() <= MAX_HTML_BYTES + 16, "{}", out.len());
+        assert!(out.starts_with("<p>word word"));
+        // Cut on a character boundary.
+        let long = "é".repeat(MAX_HTML_BYTES);
+        assert!(plain_text(&long).chars().all(|c| c == 'é'));
     }
 
     #[test]

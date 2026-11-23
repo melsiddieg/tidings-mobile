@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import Modal from './Modal.svelte';
+  import RulesSettings from './RulesSettings.svelte';
   import { store } from '../lib/store.svelte';
   import type { ComponentCheck, Settings } from '../lib/types';
   import { api, errorText } from '../lib/api';
@@ -13,10 +14,11 @@
   const SECTIONS = [
     { id: 'general', label: 'General', icon: 'settings' },
     { id: 'reading', label: 'Reading', icon: 'book' },
+    { id: 'rules', label: 'Rules', icon: 'filter' },
     { id: 'appearance', label: 'Appearance', icon: 'palette' },
     { id: 'privacy', label: 'Privacy & network', icon: 'shield' },
     { id: 'security', label: 'Security', icon: 'lock' },
-    { id: 'ai', label: 'AI briefs', icon: 'sparkles' },
+    { id: 'ai', label: 'Local AI', icon: 'sparkles' },
     { id: 'storage', label: 'Archive & data', icon: 'archive' },
     { id: 'about', label: 'About', icon: 'info' },
   ];
@@ -37,6 +39,7 @@
   let videoPlayer = $state(store.settings.videoPlayer);
   let aiEndpoint = $state(store.settings.aiEndpoint);
   let aiModel = $state(store.settings.aiModel);
+  let translateModel = $state(store.settings.translateModel);
   let aiModels = $state<string[] | null>(null);
   let aiModelsError = $state<string | null>(null);
   let aiLoading = $state(false);
@@ -115,7 +118,8 @@
     if (id === s.aiProvider) return;
     aiModels = null;
     aiModelsError = null;
-    if (await store.updateSettings({ aiProvider: id, aiEndpoint: '', aiModel: '' })) {
+    if (await store.updateSettings({ aiProvider: id, aiEndpoint: '', aiModel: '', translateModel: '' })) {
+      translateModel = '';
       aiEndpoint = '';
       aiModel = '';
       loadAiModels();
@@ -132,6 +136,12 @@
     aiModel = name.trim();
     if (aiModel === s.aiModel) return;
     if (!(await store.updateSettings({ aiModel }))) aiModel = s.aiModel;
+  }
+
+  async function saveTranslateModel(name: string) {
+    translateModel = name.trim();
+    if (translateModel === s.translateModel) return;
+    if (!(await store.updateSettings({ translateModel }))) translateModel = s.translateModel;
   }
 
   // Ask the server for its models when the section opens.
@@ -260,6 +270,8 @@
             </div>
           </div>
         </div>
+      {:else if current === 'rules'}
+        <RulesSettings />
       {:else if current === 'appearance'}
         <div class="card">
           <div class="row stack">
@@ -384,9 +396,10 @@
             <div class="row-text">
               <span class="row-title">Local model</span>
               <span class="hint">
-                A brief summarizes the articles the list shows (a folder, a type, a date range) in a few topics, with links to
-                its sources. It is written by a language model on this computer or your local network, never in the cloud.
-                Tidings sends that model the titles, feed names, dates and short excerpts of those articles, and nothing else.
+                A language model on this computer or your local network, never in the cloud, writes briefs and translates
+                articles. A brief summarizes the articles the list shows (a folder, a type, a date range) in a few topics, with
+                links to its sources; for it, Tidings sends the model the titles, feed names, dates and short excerpts of those
+                articles, and nothing else. A translation sends the text of the one article you translate.
               </span>
             </div>
             <div class="ai-providers">
@@ -404,14 +417,14 @@
               <input class="input mono" bind:value={aiEndpoint} onblur={saveAiEndpoint} onkeydown={onEnter(saveAiEndpoint)} placeholder={aiDefault} spellcheck="false" autocomplete="off" />
               {#if aiRemote}
                 <span class="hint">
-                  <Icon name="alert" size={12} /> This server is another machine. Briefs send it article titles and excerpts over your
+                  <Icon name="alert" size={12} /> This server is another machine. Briefs and translations send it article text over your
                   network{(s.aiEndpoint || aiDefault).startsWith('https:') ? '' : ', unencrypted'}. Use it only on a network you trust.
                 </span>
               {/if}
             </div>
             <div class="row stack">
               <div class="row-text">
-                <span class="row-title">Model</span>
+                <span class="row-title">Model for briefs</span>
                 <span class="hint">
                   {#if aiLoading}Asking the server for its models…
                   {:else if aiModelsError}{aiModelsError}
@@ -432,6 +445,44 @@
                   {#if aiLoading}<span class="spinner"></span>{:else}<Icon name="refresh" size={13} />{/if}Check server
                 </button>
               </div>
+            </div>
+            <div class="row stack">
+              <div class="row-text">
+                <span class="row-title">Translation model</span>
+                <span class="hint">
+                  Translates an article when you click Translate (or press T), paragraph by paragraph. Qwen models (for
+                  example qwen3:4b) translate Chinese and Arabic well; larger models translate better.
+                </span>
+              </div>
+              <div class="inline">
+                {#if aiModels && aiModels.length > 0}
+                  <select class="input" value={translateModel} onchange={(e) => saveTranslateModel((e.currentTarget as HTMLSelectElement).value)}>
+                    <option value="">Same as briefs</option>
+                    {#if translateModel && !aiModels.includes(translateModel)}<option value={translateModel}>{translateModel}</option>{/if}
+                    {#each aiModels as m (m)}<option value={m}>{m}</option>{/each}
+                  </select>
+                {:else}
+                  <input class="input mono" bind:value={translateModel} onblur={() => saveTranslateModel(translateModel)} onkeydown={onEnter(() => saveTranslateModel(translateModel))} placeholder="Same as briefs" spellcheck="false" autocomplete="off" />
+                {/if}
+              </div>
+            </div>
+            <div class="row">
+              <div class="row-text">
+                <span class="row-title">Translate into</span>
+                <span class="hint">
+                  {s.translateTo === 'ar'
+                    ? 'Every article not in Arabic gets a Translate button. Arabic articles can be translated into English.'
+                    : 'Chinese and Arabic articles get a Translate button. Chinese articles can also be translated into Arabic.'}
+                </span>
+              </div>
+              <select
+                class="input"
+                value={s.translateTo}
+                onchange={(e) => store.updateSettings({ translateTo: (e.currentTarget as HTMLSelectElement).value as 'en' | 'ar' })}
+              >
+                <option value="en">English</option>
+                <option value="ar">Arabic (العربية)</option>
+              </select>
             </div>
           {/if}
         </div>
@@ -469,6 +520,23 @@
               <button class="btn small" onclick={() => store.importOpml()}><Icon name="download" size={13} />Import</button>
               <button class="btn small" onclick={() => store.exportOpml()}><Icon name="upload" size={13} />Export</button>
             </div>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <span class="row-title">Backup</span>
+              <span class="hint">One file with your feeds, folders, articles and their read and starred state, settings, rules and saved searches. It holds your feed addresses and proxy setting, which can include passwords: keep it private.</span>
+            </div>
+            <div class="inline">
+              <button class="btn small" onclick={() => store.backup()}><Icon name="archive" size={13} />Back up…</button>
+              <button class="btn small" onclick={() => store.chooseBackup()}><Icon name="clock" size={13} />Restore…</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <span class="row-title">Starred articles</span>
+              <span class="hint">Saves them in one file: HTML for a web browser, or Markdown for a notes app.</span>
+            </div>
+            <button class="btn small" onclick={() => (store.dialog = { kind: 'export-starred' })}><Icon name="star" size={13} />Export…</button>
           </div>
           <div class="row">
             <div class="row-text">

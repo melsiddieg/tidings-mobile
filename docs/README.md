@@ -22,13 +22,17 @@ Source: <https://github.com/melsiddieg/tidings>
 - **Feed types**: Podcasts, Videos, Code & releases, Discussions, Newsletters and Articles
   each get a view in the sidebar. The type is worked out on your computer from the feed's
   address (GitHub, YouTube, Reddit, Substack and others) and from what its recent items
-  carry (audio means podcast); you can set it yourself in the feed's properties.
+  carry (audio means podcast). If a feed lands in the wrong view, right-click it and
+  choose **Change type** (or select several feeds and change them together); Automatic
+  goes back to the detected type.
   Inside a folder (and in All articles and Starred), icons above the list show one type
   at a time, with unread counts; "Mark all as read" then marks only that type.
 - **Date filter**: Today, Yesterday, Last 7 or 30 days, This year, Older than 30 days or
   a custom range. It combines with everything else, and "Mark all as read" follows it,
   so *Older than 30 days* then *Mark all as read* clears a backlog.
-- Search over titles, text and authors.
+- Search over titles, text and authors. Feeds whose name or address matches come first,
+  each with the folder it is in and a **Move** button; click one to open it. While you
+  search, each article also shows its feed's folder.
 - Next/previous unread across feeds, and Akregator-style keyboard navigation (`?` lists all keys).
 - **Podcast player** with resume, seeking, 0.8×–2× speed and volume. Audio streams
   through Tidings' own proxy in byte ranges, and download-tracking redirects
@@ -60,7 +64,21 @@ Source: <https://github.com/melsiddieg/tidings>
   topics with points that link to their source articles. A language model on this
   computer or your local network writes it (Ollama, LM Studio, llama.cpp), never a cloud
   service, and it only sees titles, feed names, dates and short excerpts. Off until you
-  choose a model in Settings → AI briefs.
+  choose a model in Settings → Local AI.
+- **Translate articles** into English or Arabic with the same local model, paragraph by
+  paragraph, with the article's images in place. Settings → Local AI → **Translate into**
+  picks the usual language. With English, Chinese and Arabic articles get a Translate
+  button (or `T`). With Arabic, every article not in Arabic does, and the Arabic text is
+  shown right to left. Under a translation, one click switches to the other language
+  where it fits (a Chinese article into Arabic, for example). Translations are kept, one
+  per language, until the article's text changes. Qwen models translate Chinese and
+  Arabic well; Settings → Local AI can name a model for translations only.
+- **Filter rules** (Settings → Rules): when the title, the text, the author or the link
+  contains certain words, mark the article as read, star it or delete it. For all
+  feeds, a folder or one feed. Rules run on new articles; you can also apply a rule to
+  the articles already stored, after seeing how many it matches. Words match whole, in
+  any case, and `crypto*` matches the start of a word. Starred articles are never
+  deleted or marked as read by a rule.
 - **Security check** (Settings → Security): shows whether Tidings, yt-dlp and WebKitGTK
   (Linux, BSD) are up to date, and how to update each one, matched to how it was installed.
   Without going online it checks how old each one is, at every start, and shows a notice
@@ -72,13 +90,54 @@ Source: <https://github.com/melsiddieg/tidings>
 **Subscriptions**
 - Folders with any depth. Drag and drop to put any feed or folder anywhere, including
   feeds above folders.
+- **Sort** the subscriptions (the arrows next to Subscriptions, or the `…` menu) by name,
+  date added, unread articles or latest article, ascending or descending, with folders
+  first. Turn off "Sort feeds too" to sort only folders. Manual order goes back to the
+  order you made by dragging, which sorting never changes.
+- Move a feed to another folder from its right-click menu (in the sidebar or on any of
+  its articles), from the search results, or by dragging.
+- Add a feed straight into a folder with the **+** on the folder's row. The **+** at the
+  top (and ⌘N) adds to the selected folder, or to the folder of the selected feed.
 - Favorites: pin feeds and folders to the top of the sidebar.
+- **Saved searches**: keep a list as it is (a feed or folder, unread or all, search words,
+  dates, a feed type) under a name in the sidebar, with its unread count. Dates such as
+  "Last 7 days" stay relative. Save one from the view options above the list or the `…`
+  menu; rename or delete it with a right click.
+- **Feed health** (`…` menu): feeds that fail, with their error and when they last
+  worked; feeds that have posted nothing for six months; and paused feeds. Retry, pause,
+  resume, open the properties or unsubscribe from there.
 - Select several feeds and folders with ⌘/Ctrl-click or Shift-click and delete them at
   once. Settings → Archive & data → **Remove all** starts over.
 - Collapse or expand all folders with one click; Option/Alt-click a folder's arrow to
   open or close everything inside it. Folders from an OPML import start closed.
-- Add a feed by pasting a site address. Tidings finds the feed (autodiscovery).
+- Add a feed by pasting any page address. Tidings finds the feed: the feeds a page
+  names, links in the page that lead to feeds, the feeds of the site's home page, and
+  common feed addresses such as `/feed`. It also knows sites that do not name their
+  feeds: a YouTube channel, playlist or video gives the channel's or playlist's feed;
+  a subreddit or Reddit user, a GitHub project (releases and commits) or user, a Medium
+  writer, publication or tag, and an Apple Podcasts or Overcast page give theirs.
+- **Public Telegram channels** as feeds: paste a channel's `t.me` link (or a link to one
+  of its posts). Telegram has no feeds, so Tidings reads the channel's public web
+  preview (`t.me/s/name`, no account needed): the 20 newest posts at each refresh, with
+  their text, photos and links; a video shows its picture and a link to watch it on
+  Telegram. Only public channels that keep the preview on work, not groups or private
+  channels, and only t.me is contacted.
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
+  Before an import, Tidings shows what the file adds: only feeds you do not follow yet,
+  so nothing is added twice, even when an address differs only in `http`/`https`,
+  `www.` or a trailing slash. When the file puts feeds you follow in other folders, you
+  choose: keep your folders (new folders from the file go at the end), or move those
+  feeds to the file's folders.
+- **Backup and restore** (Settings → Archive & data, or the `…` menu): one file with
+  your feeds, folders, articles with their read and starred state, settings, rules,
+  saved searches, briefs and translations. Before a restore replaces everything, Tidings
+  shows what the backup holds and copies the current data to `tidings-before-restore.db`
+  in the data folder; restore that file to go back. A restore never turns off a proxy,
+  "HTTPS only" or tracker removal that is on now, and keeps the video player set on this
+  computer.
+- **Export starred articles** to one HTML file for a browser or one Markdown file for a
+  notes app such as Obsidian, with the full text where it was loaded. Images are left
+  out unless you ask for them.
 - Per-feed properties: custom name, type, update interval, archive rule, always load full text, pause updates.
 - Feed icons, unread counts on folders and on the dock/launcher icon.
 
@@ -91,21 +150,23 @@ Source: <https://github.com/melsiddieg/tidings>
 
 | Measure | What it does |
 |---|---|
-| No telemetry | No analytics, crash reporting, automatic update checks or accounts. Tidings contacts the feeds you add; once per feed, the feed's website for its icon; the images of the articles in the list and of the article you open (unless images are off); and the pages and media you open. The security check in Settings reads versions on this computer; it asks GitHub and webkitgtk.org for newer versions only when you click "Check now". |
-| HTML sanitizing in Rust | Feed HTML goes through [ammonia](https://github.com/rust-ammonia/ammonia) twice (when stored and when shown). Scripts, styles, event handlers, forms and iframes are removed. Embedded videos become plain links. |
+| No telemetry | No analytics, crash reporting, automatic update checks or accounts. Tidings contacts the feeds you add, and the pages it reads to find a feed when you add one (for an Apple Podcasts or Overcast page, also Apple's directory at itunes.apple.com, which gives the podcast's feed address); once per feed, the feed's website for its icon; the images of the articles in the list and of the article you open (unless images are off); and the pages and media you open. The security check in Settings reads versions on this computer; it asks GitHub and webkitgtk.org for newer versions only when you click "Check now". |
+| HTML sanitizing in Rust | Feed HTML goes through [ammonia](https://github.com/rust-ammonia/ammonia) twice (when stored and when shown). Scripts, styles, event handlers, forms and iframes are removed. Embedded videos become plain links. HTML whose elements nest more than 200 deep is shown as plain text, because nesting that deep makes every HTML parser very slow; Tidings finds it in one pass over the tags before anything is parsed. HTML longer than 2 MB is cut. Titles are cut at 500 characters. |
 | Strict Content Security Policy | The web view may only run the app's own scripts and use the app's own stylesheet. It cannot load remote scripts, styles, fonts, frames or media, and a `<style>` element added at run time is refused. Only `style` attributes are allowed inline, which the UI needs in two places. This needs WebKit from Safari 15.4 or WebKitGTK 2.36 (macOS 12.3, Ubuntu 22.04, Debian 12 and newer). |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (see below). The image host still sees your IP address (or your proxy's) and the time of the request: thumbnails in the article list are fetched when the list shows them, before you open the article. Images can be turned off; then they load only when you click "Load images". |
-| AI briefs | Only with a model server on this computer or your local network: Tidings refuses public addresses, and with a proxy set it accepts only IP addresses, so no name is looked up outside the proxy. The model gets the titles, feed names, dates and short excerpts of the articles being briefed, nothing else. Article text cannot steer the brief into links or markup: the model answers in JSON that cites articles by number, Tidings keeps only citations of articles it sent, and the brief is shown as plain text. |
-| Image re-encoding | Every image is decoded in Rust, with memory limits, and written out again as a new JPEG, PNG or GIF before the web view sees it. WebKit's image libraries (libwebp, libjpeg-turbo, libpng...) never parse a file from the internet, so a crafted image cannot reach a bug in them. Metadata is dropped and large images are scaled down. SVG is drawn to a PNG in Rust as well (with resvg), so WebKit's SVG code never sees a file from the internet; images that an SVG refers to are not loaded. SVG is drawn in a separate helper process with a time limit and a memory limit: a small crafted SVG can crash the drawing library or keep it busy for minutes, and then only the helper ends and that image is not shown. AVIF is not shown. |
+| AI briefs and translations | Only with a model server on this computer or your local network: Tidings refuses public addresses, and with a proxy set it accepts only IP addresses, so no name is looked up outside the proxy. The model gets the titles, feed names, dates and short excerpts of the articles being briefed, nothing else. Article text cannot steer the brief into links or markup: the model answers in JSON that cites articles by number, Tidings keeps only citations of articles it sent, and the brief is shown as plain text. A translation sends the text of the one article you translate, only when you click Translate, and shows the model's answer as plain text, so an article that tries to steer the model can at worst produce a wrong translation. The article's images are shown between the translated paragraphs; they come from the stored article through the same cleaning and image proxy as the original, never from the model. |
+| Image re-encoding | Every image is decoded in Rust, with memory limits, and written out again as a new JPEG, PNG or GIF before the web view sees it. WebKit's image libraries (libwebp, libjpeg-turbo, libpng...) never parse a file from the internet, so a crafted image cannot reach a bug in them. Metadata is dropped and large images are scaled down. SVG is drawn to a PNG in Rust as well (with resvg), so WebKit's SVG code never sees a file from the internet; images that an SVG refers to are not loaded. An animated GIF keeps its frames only up to 2400 pixels on a side, and up to a limit on frames times picture size: the web view allocates the whole picture for each frame, however small the frame is. A larger one is shown as a still picture, scaled down. SVG is drawn in a separate helper process with a time limit and a memory limit: a small crafted SVG can crash the drawing library or keep it busy for minutes, and then only the helper ends and that image is not shown. AVIF is not shown. |
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped, and so are images marked as 0 or 1 pixel wide or high. This cannot catch every counting pixel: with images on, a feed can still tell that you loaded an article. |
-| Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. Only single audio and video files are played. A streaming playlist (HLS, DASH and similar) is refused, whatever its address or type says: a playlist is a list of addresses that the media engine would fetch by itself, without the proxy setting and without the local network rule. |
+| Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. Only single audio and video files are played. A streaming playlist (HLS, DASH and similar) is refused, whatever its address or type says, also when it comes after ID3 or APE tags at the start of the file (GStreamer removes such tags before it looks at the rest): a playlist is a list of addresses that the media engine would fetch by itself, without the proxy setting and without the local network rule. |
 | Reader mode for links | Linked pages are fetched by Rust and reduced to the article. No site JavaScript runs. |
 | Videos | PeerTube videos and video files play in a `<video>` element fed by the same Rust media proxy as podcasts: the video host never talks to the web view. Other videos are played by mpv or IINA, never by an embedded site player. The player makes its own connections. With a proxy set, Tidings passes it to mpv or IINA, and refuses to start a player when the video would bypass the proxy (mpv cannot use SOCKS proxies such as Tor). Tidings refuses to give the player an address on your local network, but that check covers only the address in the feed: mpv, IINA and yt-dlp then make their own connections and follow redirects themselves, outside Tidings' local network rule, like a browser would. "Listen" runs yt-dlp only to find a video's audio stream, with your proxy (SOCKS included) and without your yt-dlp configuration, so a `--cookies-from-browser` line there never sends your account cookies; the audio itself streams through Tidings' media proxy. |
 | No navigation | The window can only show the app itself. All other navigation and pop-ups are blocked; links open in a reader tab or your browser. |
 | Minimal permissions | The UI has four Tauri permissions (listen to events, drag and maximize the window). File dialogs and file access happen in Rust only. |
-| Local network protection | A feed cannot make Tidings send requests into your local network. Feeds, pages, favicons, images, audio and video may only reach public addresses; private and local ones are refused in the first URL, after every rewrite (such as removing a podcast tracking prefix), in every redirect and in DNS answers. The one exception is a feed you allow yourself: when an address is on your local network (a NAS or a home server), Tidings asks before it connects and before it subscribes, also when a website names such an address as its feed. That consent covers only the feed's own host and port: the feed itself and its icon. Links in articles, reader tabs, images, podcasts and videos never reach the local network, also not from a local feed; open those in your browser. Where a name resolves plays no part: a public-looking name that points to a private address is refused unless you allowed it. With a proxy, the proxy does the DNS lookups, so only literal private addresses and local names can be refused: Tidings cannot see where the proxy sends a name. This rule covers the requests Tidings makes. It does not cover mpv, IINA and yt-dlp after you click "Watch" or "Listen": they are separate programs that make their own connections (see Videos). |
-| Network hardening | rustls TLS, no cookie store, no `Referer` header, size limits on every download, generic user agent, optional HTTPS-only mode, optional HTTP/SOCKS5 proxy (works with Tor: `socks5h://127.0.0.1:9050`). SOCKS proxies always do the DNS lookups themselves: `socks5://` is saved as `socks5h://`. If the saved settings or the proxy in them cannot be used, Tidings starts offline instead of connecting directly. |
-| Local data | Feeds, articles, settings and briefs are in one SQLite database, file mode `0600` in a `0700` folder. `secure_delete` is on: when an article is deleted or archived, its text, title, link and author are overwritten, and only its ID stays for 60 days so it does not come back. After you delete articles, a feed, a folder or a brief, the database's write-ahead log is emptied too, so the deleted text is not left there. Outside the database: open tabs, playback positions and view settings are in the web view's local storage, shown images are in its cache, and the window size is in a small file, all in the system's folders for this app. An OPML export is written with mode `0600`; it lists every feed address, including a password if an address has one. Backups (such as Time Machine) can keep older copies of all of these. |
+| Local network protection | A feed cannot make Tidings send requests into your local network. Feeds, pages, favicons, images, audio and video may only reach public addresses; private and local ones are refused in the first URL, after every rewrite (such as removing a podcast tracking prefix), in every redirect and in DNS answers. The one exception is a feed you allow yourself: when an address is on your local network (a NAS or a home server), Tidings asks before it connects and before it subscribes, also when a website names such an address as its feed. That consent covers only the feed's own host and port: the feed itself, its icon, and the full text of its articles when the article's page is on that same host and port. Links inside articles, reader tabs, images, podcasts and videos never reach the local network, also not from a local feed; open those in your browser. Where a name resolves plays no part: a public-looking name that points to a private address is refused unless you allowed it. With a proxy, the proxy does the DNS lookups, so only literal private addresses and local names can be refused: Tidings cannot see where the proxy sends a name. This rule covers the requests Tidings makes. It does not cover mpv, IINA and yt-dlp after you click "Watch" or "Listen": they are separate programs that make their own connections (see Videos). |
+| Network hardening | rustls TLS, no cookie store, no `Referer` header, size limits on every download, generic user agent, optional HTTPS-only mode, optional HTTP/SOCKS5 proxy (works with Tor: `socks5h://127.0.0.1:9050`). SOCKS proxies always do the DNS lookups themselves: `socks5://` is saved as `socks5h://`. Tidings ignores the system's proxy settings and the `HTTP_PROXY` family of variables: with no proxy set, it connects directly. mpv, IINA and yt-dlp get the same: the proxy set in Tidings, or none. If the saved settings or the proxy in them cannot be used, Tidings starts offline instead of connecting directly. |
+| Local data | Feeds, articles, settings and briefs are in one SQLite database, file mode `0600` in a `0700` folder. `secure_delete` is on: when an article is deleted or archived, its text, title, link and author are overwritten, and only its ID stays for 60 days so it does not come back. After you delete articles, a feed, a folder or a brief, and after each refresh (which archives old articles), the database's write-ahead log is emptied too, so the deleted text is not left there. Outside the database: open tabs, playback positions and view settings are in the web view's local storage, shown images are in its cache, and the window size is in a small file, all in the system's folders for this app. An OPML export, a backup and a starred article export are written with mode `0600`; the first two list every feed address, including a password if an address has one, and a backup also holds the proxy setting. Backups (such as Time Machine) can keep older copies of all of these. |
+| Restoring a backup | A backup file is treated like a file from the internet. Tidings opens it read-only with SQLite's settings for files that cannot be trusted, checks it, and copies only the rows of the tables it knows into its own database: the file's tables, views, triggers and indexes never become part of Tidings. Every value must have the type of its column and fit a size limit; rules and saved searches are checked like new ones, and settings like saved ones. Stored article HTML is cleaned again before it is shown, like all article HTML. The settings never weaken this computer's protection: a proxy in use stays, "HTTPS only" and tracker removal stay on, and the video player is never taken from the file, since it names a program Tidings starts. Feeds allowed on your local network keep that permission; the summary before the restore lists their addresses. |
+| Starred article export | The HTML is cleaned again, links keep only web and mail addresses, and images are left out unless you ask for them. The HTML file carries a content security policy that blocks scripts, frames and everything else from the web, and allows images only when you included them. |
 
 Data folder:
 - macOS: `~/Library/Application Support/org.tidings.reader/`
@@ -174,8 +235,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.9.4-freebsd-x86_64.tar.gz
-./tidings-0.9.4-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.15.0-freebsd-x86_64.tar.gz
+./tidings-0.15.0-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next
@@ -349,6 +410,7 @@ backend is only loaded in development and is not part of release builds.
 | `L` | Listen to the video's sound in the podcast player |
 | `F` | Load the full article |
 | `I` | Show or hide images |
+| `T` | Translate the article (into English or Arabic, see Settings → Local AI), or show the original |
 | `S` | Star |
 | `M` | Mark read / unread |
 | `C` | Copy link |
@@ -374,14 +436,19 @@ src-tauri/src/
   commands.rs            Commands the UI can call
   db.rs                  SQLite schema and queries
   feeds.rs               Fetching, parsing and storing feeds; favicons
-  discover.rs            Feed autodiscovery from a web page
+  discover.rs            Finds the feed of a page: links, known sites, common paths
   opml.rs                OPML import and export
+  backup.rs              Backups of the whole database, and restoring them
+  export.rs              Starred articles as one HTML or Markdown file
+  files.rs               Writing files only this user can read
   reader.rs              Reader mode (article extraction)
   sanitize.rs            HTML cleaning and tracker removal
   protocol.rs            tidings:// image proxy and feed icons
   images.rs              Re-encodes every image before the web view sees it
   updates.rs             Security check: are Tidings, yt-dlp and WebKitGTK up to date?
   brief.rs               AI briefs written by a local model (Ollama, LM Studio, llama.cpp)
+  translate.rs           Translation into English or Arabic by the same local model
+  rules.rs               Filter rules: matching words in new articles
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup
   menu.rs                macOS menu bar

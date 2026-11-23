@@ -1,12 +1,15 @@
 // Tidings: a private, secure feed reader.
 
+mod backup;
 mod brief;
 mod commands;
 mod db;
 mod discover;
 mod error;
+mod export;
 mod feed_types;
 mod feeds;
+mod files;
 mod images;
 mod media;
 mod media_server;
@@ -17,10 +20,13 @@ mod opml;
 mod peertube;
 mod protocol;
 mod reader;
+mod rules;
 mod sanitize;
 mod scheduler;
 mod settings;
 mod state;
+mod telegram;
+mod translate;
 mod updates;
 mod video;
 #[cfg(test)]
@@ -169,7 +175,12 @@ fn seed_default_feeds(state: &state::AppState) {
 
     let conn = state.db();
     if db::get_value(&conn, SEED_KEY).is_none() {
-        if let Ok((folder_id, _)) = db::find_or_create_folder(&conn, "Jupiter Broadcasting", None) {
+        let folder_id = db::folders(&conn)
+            .ok()
+            .and_then(|fs| fs.into_iter().find(|f| f.parent_id.is_none() && f.title.eq_ignore_ascii_case("Jupiter Broadcasting")).map(|f| f.id))
+            .map(Ok)
+            .unwrap_or_else(|| db::create_folder(&conn, "Jupiter Broadcasting", None));
+        if let Ok(folder_id) = folder_id {
             for &(url, title, site_url) in JB_FEEDS {
                 if db::feed_id_by_url(&conn, url).ok().flatten().is_none() {
                     let _ = db::insert_feed(&conn, url, Some(folder_id), Some(title), Some(site_url));
@@ -288,6 +299,7 @@ pub fn run() {
             commands::discover_feeds,
             commands::add_feed,
             commands::update_feed,
+            commands::set_feed_type,
             commands::delete_feed,
             commands::move_feed,
             commands::create_folder,
@@ -300,7 +312,9 @@ pub fn run() {
             commands::delete_items,
             commands::delete_all_subscriptions,
             commands::refresh_feeds,
+            commands::preview_opml,
             commands::import_opml,
+            commands::cancel_opml_import,
             commands::export_opml,
             commands::get_settings,
             commands::save_settings,
@@ -311,6 +325,19 @@ pub fn run() {
             commands::check_components,
             commands::ai_models,
             commands::make_brief,
+            commands::translate_article,
+            commands::stop_translation,
+            commands::feed_activity,
+            commands::count_articles,
+            commands::list_searches,
+            commands::save_search,
+            commands::rename_search,
+            commands::delete_search,
+            commands::list_rules,
+            commands::save_rule,
+            commands::delete_rule,
+            commands::count_rule_matches,
+            commands::apply_rule,
             commands::briefs,
             commands::brief,
             commands::delete_brief,
@@ -319,6 +346,10 @@ pub fn run() {
             commands::search_peertube,
             commands::set_badge,
             commands::app_info,
+            commands::backup,
+            commands::choose_backup,
+            commands::restore_backup,
+            commands::export_starred,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tidings");

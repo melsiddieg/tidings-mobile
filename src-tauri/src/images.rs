@@ -94,7 +94,9 @@ const WORKER_MEMORY: usize = 512 * 1024 * 1024;
 const MAX_PNG_BYTES: usize = 64 * 1024 * 1024;
 /// SVG files that stopped the helper are remembered, up to this many.
 const MAX_REFUSED: usize = 256;
-/// Animated GIFs: at most this many frames, and this many pixels in all frames together.
+/// Animated GIFs: at most this many frames, and this many pixels drawn for all
+/// frames together. The web view draws each frame onto a buffer of the whole
+/// picture, so a frame counts as large as the picture, however small it is.
 const MAX_GIF_FRAMES: usize = 1_000;
 const MAX_GIF_PIXELS: u64 = 200_000_000;
 const JPEG_QUALITY: u8 = 88;
@@ -297,6 +299,14 @@ impl Drawer {
     }
 }
 
+/// Tests that draw through the helper hold this, so they run one at a time. Each
+/// test has its own tokio runtime, and a helper's pipes are read by the runtime
+/// that started it. A test that got the helper of another running test would wait
+/// for a runtime that is busy with that test, and then blame its SVG for the wait.
+/// (The app has one runtime.)
+#[cfg(test)]
+pub(crate) static HELPER_TESTS: Mutex<()> = Mutex::const_new(());
+
 /// Draws an SVG to a PNG in the helper process, one at a time. Returns None when
 /// the SVG is refused, when it stops the helper (a crash, or too much memory) and
 /// when it takes too long. The helper is then stopped, and the next SVG starts a
@@ -414,14 +424,23 @@ static USED: AtomicUsize = AtomicUsize::new(0);
 impl Capped {
     fn take(size: usize) -> bool {
         let cap = CAP.load(Ordering::Relaxed);
-        if cap == 0 {
-            return true;
-        }
-        if USED.fetch_add(size, Ordering::Relaxed).saturating_add(size) > cap {
-            USED.fetch_sub(size, Ordering::Relaxed);
+        cap == 0 || Self::count(&USED, cap, size)
+    }
+
+    /// Adds `size` to `used` unless the total would pass `cap`.
+    fn count(used: &AtomicUsize, cap: usize, size: usize) -> bool {
+        // `fetch_add` returns the value from before the add, so this sum is the
+        // new total.
+        if used.fetch_add(size, Ordering::Relaxed).saturating_add(size) > cap {
+            used.fetch_sub(size, Ordering::Relaxed);
             return false;
         }
         true
+    }
+
+    /// Whether this process is the SVG helper: only `worker_main` sets a limit.
+    fn is_helper() -> bool {
+        CAP.load(Ordering::Relaxed) != 0
     }
 
     fn give(size: usize) {
@@ -506,9 +525,10 @@ fn fonts() -> Arc<fontdb::Database> {
 /// Call this only in the helper process (`worker_main`); the app uses `draw`. A
 /// crafted SVG can end the process that calls this: usvg and resvg follow nested
 /// elements and chains of clip paths, masks and `<tspan>` with recursion, and a
-/// few thousand levels overflow the stack.
-pub fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
-    if bytes.len() > MAX_SVG_BYTES {
+/// few thousand levels overflow the stack. So outside the helper this draws
+/// nothing (the tests call it directly, with drawings that are safe).
+pub(crate) fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
+    if bytes.len() > MAX_SVG_BYTES || !(cfg!(test) || cfg!(target_os = "android") || Capped::is_helper()) {
         return None;
     }
     let options = usvg::Options {
@@ -571,7 +591,11 @@ fn lossy_webp(bytes: &[u8]) -> bool {
 
 /// Rewrites a GIF frame by frame: the same palettes, positions, delays and
 /// disposal, without loss. Nothing is scaled. Returns None for files that break the
-/// limits; `reencode` then keeps only a still picture.
+/// limits; `reencode` then keeps only a still picture, scaled down.
+///
+/// The picture's own size (the "logical screen") is what the web view allocates,
+/// 4 bytes per pixel, before it draws even a 1x1 frame. So it is limited like a
+/// still picture's: no side longer than `Use::Article.max_side()`.
 fn gif(bytes: &[u8]) -> Option<Clean> {
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::Indexed);
@@ -580,9 +604,11 @@ fn gif(bytes: &[u8]) -> Option<Clean> {
     options.check_frame_consistency(true);
     let mut decoder = options.read_info(Cursor::new(bytes)).ok()?;
     let (width, height) = (decoder.width(), decoder.height());
-    if width == 0 || height == 0 || u32::from(width) > MAX_DIMENSION || u32::from(height) > MAX_DIMENSION {
+    let max = Use::Article.max_side();
+    if width == 0 || height == 0 || u32::from(width) > max || u32::from(height) > max {
         return None;
     }
+    let canvas = u64::from(width) * u64::from(height);
     let global = decoder.global_palette().map(<[u8]>::to_vec).unwrap_or_default();
     let repeat = decoder.repeat();
     let mut out = Vec::new();
@@ -592,7 +618,7 @@ fn gif(bytes: &[u8]) -> Option<Clean> {
         let (mut frames, mut pixels) = (0usize, 0u64);
         while let Some(frame) = decoder.read_next_frame().ok()? {
             frames += 1;
-            pixels += u64::from(frame.width) * u64::from(frame.height);
+            pixels += canvas;
             if frames > MAX_GIF_FRAMES || pixels > MAX_GIF_PIXELS {
                 return None;
             }
@@ -708,6 +734,24 @@ mod tests {
     /// Set for the copy of the test program that runs as the SVG helper.
     pub const HELPER_ENV: &str = "TIDINGS_SVG_HELPER";
 
+    /// The limit is on the total in use: one allocation may be larger than half of it.
+    #[test]
+    fn memory_limit_counts_each_allocation_once() {
+        const MB: usize = 1024 * 1024;
+        let used = AtomicUsize::new(0);
+        // One allocation of more than half the limit fits.
+        assert!(Capped::count(&used, 512 * MB, 300 * MB));
+        // The rest fits too, up to the last byte.
+        assert!(Capped::count(&used, 512 * MB, 212 * MB));
+        assert_eq!(used.load(Ordering::Relaxed), 512 * MB);
+        // One byte more does not, and a refused allocation is not counted.
+        assert!(!Capped::count(&used, 512 * MB, 1));
+        assert!(!Capped::count(&used, 512 * MB, usize::MAX));
+        assert_eq!(used.load(Ordering::Relaxed), 512 * MB);
+        // The app process sets no limit, so it is not taken for the helper.
+        assert!(!Capped::is_helper());
+    }
+
     /// Not a test: `worker_command` starts the test program again with this name,
     /// and it then is the SVG helper process. Run in any other way, it does nothing.
     #[test]
@@ -724,6 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn crafted_svg_stops_only_the_helper() {
+        let _one_at_a_time = HELPER_TESTS.lock().await;
         let draw = |svg: Vec<u8>| clean(svg, "image/svg+xml", Use::Article);
         let good = drawing(40, "<rect width='20' height='20' fill='red'/>");
         let out = draw(good.clone()).await.unwrap();
@@ -768,6 +813,44 @@ mod tests {
         assert!(draw(drawing(1600, &slow)).await.is_none());
         assert!(started.elapsed() < WORKER_TIMEOUT + Duration::from_secs(3));
         assert!(draw(good).await.is_some());
+    }
+
+    /// The report on 0.9.5: a 42-byte GIF with a 16384 x 16384 picture and one
+    /// 1 x 1 frame made the web view allocate 1 GB.
+    #[test]
+    fn animated_gif_is_limited_by_its_whole_picture() {
+        let gif_file = |width: u16, height: u16, frames: usize| {
+            let mut source = Vec::new();
+            {
+                let mut encoder = gif::Encoder::new(&mut source, width, height, &[0, 0, 0, 255, 0, 0]).unwrap();
+                for n in 0..frames {
+                    let mut frame = gif::Frame::from_indexed_pixels(1, 1, vec![(n % 2) as u8], None);
+                    frame.delay = 10;
+                    encoder.write_frame(&frame).unwrap();
+                }
+            }
+            source
+        };
+        let shown = |source: &[u8]| reencode(source, "image/gif", Use::Article);
+
+        // Too large a picture: not passed on as a GIF. A still is at most
+        // `max_side` (here the decoder refuses the 1 GB picture: nothing is shown).
+        for (width, height) in [(16_384, 16_384), (2_401, 10), (10, 2_401)] {
+            let source = gif_file(width, height, 2);
+            if let Some(out) = shown(&source) {
+                assert_ne!(out.mime, "image/gif", "{width} x {height}");
+                let still = decode(&out);
+                assert!(still.width() <= 2400 && still.height() <= 2400);
+            }
+        }
+        // Many small frames on a large picture count as large frames.
+        let out = shown(&gif_file(600, 600, 600)).unwrap();
+        assert_ne!(out.mime, "image/gif");
+        // An ordinary animation stays animated.
+        let out = shown(&gif_file(480, 270, 100)).unwrap();
+        assert_eq!(out.mime, "image/gif");
+        let decoder = gif::DecodeOptions::new().read_info(Cursor::new(&out.bytes)).unwrap();
+        assert_eq!((decoder.width(), decoder.height()), (480, 270));
     }
 
     #[test]

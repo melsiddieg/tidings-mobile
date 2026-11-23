@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::feed_types;
+use crate::rules::{self, Rule};
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -33,8 +34,18 @@ pub fn open(path: &Path) -> Result<Connection> {
          PRAGMA secure_delete = ON;",
     )?;
     migrate(&conn)?;
+    // Marks the file as Tidings' database, so a copy of it can be restored (backup.rs).
+    let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+    if id != crate::backup::APPLICATION_ID {
+        conn.pragma_update(None, "application_id", crate::backup::APPLICATION_ID)?;
+    }
     Ok(conn)
 }
+
+/// The version the last migration in `migrate` sets. A backup of a newer version is
+/// refused (backup.rs). A migration that changes what stored values mean, rather
+/// than adding tables or columns, must also raise `backup::OLDEST_VERSION`.
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// 10 November 2026, when 0.9.2 came out: since then a feed on the local network
 /// is added only after the user allowed its address.
@@ -220,6 +231,86 @@ fn migrate(conn: &Connection) -> Result<()> {
             COMMIT;"
         ))?;
     }
+    if version < 8 {
+        // v8: saved searches, filter rules (rules.rs), and translations of articles
+        // (translate.rs), one for the feed's text and one
+        // for the full text (`full`). They go with the article: removed when it is
+        // deleted (here, or by the trigger when it is archived) and when the text they
+        // translate changes.
+        conn.execute_batch(
+            "BEGIN;
+            CREATE TABLE IF NOT EXISTS translations (
+                article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+                full       INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                body       TEXT NOT NULL,
+                PRIMARY KEY (article_id, full)
+            );
+            -- Saved searches: the UI's list state (scope, filter, words, dates,
+            -- type) as JSON, shown in the sidebar with an unread count.
+            CREATE TABLE IF NOT EXISTS searches (
+                id         INTEGER PRIMARY KEY,
+                position   INTEGER NOT NULL DEFAULT 0,
+                title      TEXT NOT NULL,
+                state      TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            -- Filter rules (rules.rs). A rule for a feed or a folder goes with it.
+            CREATE TABLE IF NOT EXISTS rules (
+                id         INTEGER PRIMARY KEY,
+                position   INTEGER NOT NULL DEFAULT 0,
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                feed_id    INTEGER REFERENCES feeds(id) ON DELETE CASCADE,
+                folder_id  INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+                field      TEXT NOT NULL,
+                words      TEXT NOT NULL,
+                action     TEXT NOT NULL,
+                hits       INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS translations_follow_article
+            AFTER UPDATE OF is_deleted, title, content, full_content ON articles
+            BEGIN
+                DELETE FROM translations WHERE article_id = NEW.id AND (
+                    NEW.is_deleted = 1 OR NEW.title IS NOT OLD.title
+                    OR (full = 0 AND NEW.content IS NOT OLD.content)
+                    OR (full = 1 AND NEW.full_content IS NOT OLD.full_content));
+            END;
+            PRAGMA user_version = 8;
+            COMMIT;",
+        )?;
+    }
+    if version < 9 {
+        // v9: a translation per language (`lang`: "en" or "ar"); the ones before
+        // were all English. The primary key changes, so the table is made again.
+        // The trigger names the table, so it goes first and comes back unchanged.
+        conn.execute_batch(
+            "BEGIN;
+            DROP TRIGGER IF EXISTS translations_follow_article;
+            CREATE TABLE translations_v9 (
+                article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+                full       INTEGER NOT NULL,
+                lang       TEXT NOT NULL DEFAULT 'en',
+                created_at INTEGER NOT NULL,
+                body       TEXT NOT NULL,
+                PRIMARY KEY (article_id, full, lang)
+            );
+            INSERT INTO translations_v9 (article_id, full, lang, created_at, body)
+                SELECT article_id, full, 'en', created_at, body FROM translations;
+            DROP TABLE translations;
+            ALTER TABLE translations_v9 RENAME TO translations;
+            CREATE TRIGGER translations_follow_article
+            AFTER UPDATE OF is_deleted, title, content, full_content ON articles
+            BEGIN
+                DELETE FROM translations WHERE article_id = NEW.id AND (
+                    NEW.is_deleted = 1 OR NEW.title IS NOT OLD.title
+                    OR (full = 0 AND NEW.content IS NOT OLD.content)
+                    OR (full = 1 AND NEW.full_content IS NOT OLD.full_content));
+            END;
+            PRAGMA user_version = 9;
+            COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -315,6 +406,10 @@ pub struct Feed {
     pub detected_type: String,
     /// The user allowed Tidings to fetch this feed from the local network.
     pub local: bool,
+    /// When it was added (Unix time).
+    pub created_at: i64,
+    /// Publication date of its newest article, `None` when it has none.
+    pub newest: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -442,7 +537,8 @@ const FEED_COLUMNS: &str = "
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0 AND a.is_deleted = 0),
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0),
     f.pinned, COALESCE(f.type_override, f.detected_type), f.type_override, f.detected_type,
-    COALESCE(f.local, 0)";
+    COALESCE(f.local, 0), f.created_at,
+    (SELECT MAX(a.published) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0)";
 
 fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     // A feed without a title is shown by its address. A password in the address
@@ -475,6 +571,8 @@ fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         type_override: r.get(22)?,
         detected_type: r.get(23)?,
         local: r.get(24)?,
+        created_at: r.get(25)?,
+        newest: r.get(26)?,
     })
 }
 
@@ -739,6 +837,27 @@ pub fn get_brief(conn: &Connection, id: i64) -> Result<Option<(BriefInfo, String
         .optional()?)
 }
 
+/// A stored translation of an article (JSON) into `lang` ("en", "ar"), of its full
+/// text when `full`.
+pub fn translation(conn: &Connection, article_id: i64, full: bool, lang: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT body FROM translations WHERE article_id = ?1 AND full = ?2 AND lang = ?3",
+            params![article_id, full, lang],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+pub fn save_translation(conn: &Connection, article_id: i64, full: bool, lang: &str, body: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO translations (article_id, full, lang, created_at, body) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(article_id, full, lang) DO UPDATE SET created_at = excluded.created_at, body = excluded.body",
+        params![article_id, full, lang, now(), body],
+    )?;
+    Ok(())
+}
+
 pub fn delete_brief(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM briefs WHERE id = ?1", [id])?;
     Ok(())
@@ -757,6 +876,106 @@ pub fn list_article_ids(conn: &Connection, q: &ListQuery) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(args), |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Every starred article, newest first, with the name of its feed (export.rs).
+pub fn starred_articles(conn: &Connection) -> Result<Vec<(ArticleRow, String)>> {
+    let mut args = Vec::new();
+    let clause = where_clause(&Scope::Starred, "all", "", &DateRange::default(), None, &mut args);
+    let sql = format!("SELECT a.id FROM articles a WHERE {clause} ORDER BY a.published DESC, a.id DESC");
+    let ids: Vec<i64> = conn
+        .prepare(&sql)?
+        .query_map(params_from_iter(args), |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let names: std::collections::HashMap<i64, String> = feeds(conn)?.into_iter().map(|f| (f.id, f.title)).collect();
+    ids.into_iter()
+        .map(|id| {
+            let row = article(conn, id)?;
+            let feed = names.get(&row.feed_id).cloned().unwrap_or_default();
+            Ok((row, feed))
+        })
+        .collect()
+}
+
+/// How many articles the list would show for `q` (its limit and offset aside).
+pub fn count_articles(conn: &Connection, q: &ListQuery) -> Result<i64> {
+    let mut args = Vec::new();
+    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
+    let sql = format!("SELECT COUNT(*) FROM articles a WHERE {clause}");
+    Ok(conn.query_row(&sql, params_from_iter(args), |r| r.get(0))?)
+}
+
+/// How active a feed is, for the feed health page.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedActivity {
+    pub feed_id: i64,
+    /// Its newest article, also a deleted one (deleted articles keep their date).
+    pub newest: Option<i64>,
+    /// Articles it has now.
+    pub articles: i64,
+}
+
+pub fn feed_activity(conn: &Connection) -> Result<Vec<FeedActivity>> {
+    let rows = conn
+        .prepare(
+            "SELECT f.id, MAX(a.published), COALESCE(SUM(a.is_deleted = 0), 0)
+             FROM feeds f LEFT JOIN articles a ON a.feed_id = f.id
+             GROUP BY f.id ORDER BY f.id",
+        )?
+        .query_map([], |r| Ok(FeedActivity { feed_id: r.get(0)?, newest: r.get(1)?, articles: r.get(2)? }))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// A saved search: a name and the UI's list state (JSON).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSearch {
+    pub id: i64,
+    pub title: String,
+    pub state: String,
+}
+
+/// A saved search's name: one line of at most 100 characters.
+pub fn search_title(title: &str) -> Result<String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() || title.chars().count() > 100 {
+        return Err(Error::msg("Give the search a name of at most 100 characters"));
+    }
+    Ok(title)
+}
+
+/// Whether `state` can be a saved search's list state: a JSON object of at most 16 KB.
+pub fn search_state_is_valid(state: &str) -> bool {
+    state.len() <= 16 * 1024 && serde_json::from_str::<serde_json::Value>(state).is_ok_and(|v| v.is_object())
+}
+
+pub fn searches(conn: &Connection) -> Result<Vec<SavedSearch>> {
+    let rows = conn
+        .prepare("SELECT id, title, state FROM searches ORDER BY position, id")?
+        .query_map([], |r| Ok(SavedSearch { id: r.get(0)?, title: r.get(1)?, state: r.get(2)? }))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn insert_search(conn: &Connection, title: &str, state: &str) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO searches (position, title, state, created_at)
+         VALUES ((SELECT COALESCE(MAX(position), 0) + 1 FROM searches), ?1, ?2, ?3)",
+        params![title, state, now()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn rename_search(conn: &Connection, id: i64, title: &str) -> Result<()> {
+    conn.execute("UPDATE searches SET title = ?2 WHERE id = ?1", params![id, title])?;
+    Ok(())
+}
+
+pub fn delete_search(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM searches WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 pub fn article(conn: &Connection, id: i64) -> Result<ArticleRow> {
@@ -936,6 +1155,7 @@ pub fn store_articles(
     let mut touch = tx.prepare_cached("UPDATE articles SET last_seen = ?2 WHERE id = ?1")?;
 
     let mut added = 0;
+    let mut new = Vec::new();
     for item in items {
         let existing: Option<(i64, bool, Option<i64>)> = find
             .query_row(params![feed_id, item.guid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
@@ -962,6 +1182,7 @@ pub fn store_articles(
                     item.hash
                 ])?;
                 added += 1;
+                new.push((tx.last_insert_rowid(), item));
             }
             Some((id, false, hash)) if hash != Some(item.hash) => {
                 update.execute(params![
@@ -983,7 +1204,190 @@ pub fn store_articles(
             }
         }
     }
-    Ok(added)
+    // Articles that a rule deleted or marked as read are not news.
+    let handled = apply_rules_to_new(tx, feed_id, &new)?;
+    Ok(added - handled)
+}
+
+// ---------------------------------------------------------------------------
+// Filter rules (rules.rs)
+// ---------------------------------------------------------------------------
+
+fn rule_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rule> {
+    Ok(Rule {
+        id: r.get(0)?,
+        enabled: r.get(1)?,
+        feed_id: r.get(2)?,
+        folder_id: r.get(3)?,
+        field: r.get(4)?,
+        words: r.get(5)?,
+        action: r.get(6)?,
+        hits: r.get(7)?,
+    })
+}
+
+const RULE_COLUMNS: &str = "id, enabled, feed_id, folder_id, field, words, action, hits";
+
+pub fn rules(conn: &Connection) -> Result<Vec<Rule>> {
+    let sql = format!("SELECT {RULE_COLUMNS} FROM rules ORDER BY position, id");
+    let rules = conn.prepare(&sql)?.query_map([], rule_from_row)?.collect::<std::result::Result<_, _>>()?;
+    Ok(rules)
+}
+
+/// Stores a new rule (`id` 0) or changes one; returns its id. `rule` must be validated.
+pub fn save_rule(conn: &Connection, rule: &Rule) -> Result<i64> {
+    if rule.id == 0 {
+        conn.execute(
+            "INSERT INTO rules (position, enabled, feed_id, folder_id, field, words, action, created_at)
+             VALUES ((SELECT COALESCE(MAX(position), 0) + 1 FROM rules), ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![rule.enabled, rule.feed_id, rule.folder_id, rule.field, rule.words, rule.action, now()],
+        )?;
+        return Ok(conn.last_insert_rowid());
+    }
+    let changed = conn.execute(
+        "UPDATE rules SET enabled = ?2, feed_id = ?3, folder_id = ?4, field = ?5, words = ?6, action = ?7 WHERE id = ?1",
+        params![rule.id, rule.enabled, rule.feed_id, rule.folder_id, rule.field, rule.words, rule.action],
+    )?;
+    if changed == 0 {
+        return Err(Error::msg("This rule no longer exists"));
+    }
+    Ok(rule.id)
+}
+
+pub fn rule(conn: &Connection, id: i64) -> Result<Rule> {
+    let sql = format!("SELECT {RULE_COLUMNS} FROM rules WHERE id = ?1");
+    conn.query_row(&sql, [id], rule_from_row).optional()?.ok_or_else(|| Error::msg("This rule no longer exists"))
+}
+
+pub fn delete_rule(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM rules WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// The feeds a rule is for: one feed, the feeds in a folder and the folders inside
+/// it, or all feeds.
+pub fn rule_feeds(conn: &Connection, rule: &Rule) -> Result<Vec<i64>> {
+    let ids = if let Some(feed) = rule.feed_id {
+        conn.prepare("SELECT id FROM feeds WHERE id = ?1")?.query_map([feed], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?
+    } else if let Some(folder) = rule.folder_id {
+        conn.prepare(
+            "WITH RECURSIVE inside(id) AS (
+                SELECT ?1 UNION SELECT f.id FROM folders f JOIN inside ON f.parent_id = inside.id)
+             SELECT id FROM feeds WHERE folder_id IN inside",
+        )?
+        .query_map([folder], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?
+    } else {
+        conn.prepare("SELECT id FROM feeds")?.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?
+    };
+    Ok(ids)
+}
+
+/// What a rule can look at in a stored article.
+fn rule_article(title: String, content: Option<&str>, excerpt: &str, author: Option<String>, url: Option<String>) -> rules::Article {
+    let text = match content {
+        Some(html) if !html.is_empty() => crate::sanitize::quick_text(html),
+        _ => excerpt.to_string(),
+    };
+    rules::Article { title, text, author: author.unwrap_or_default(), url: url.unwrap_or_default() }
+}
+
+/// Does what the rules for `feed_id` say to the articles a refresh just added.
+/// Returns how many of them were deleted or marked as read.
+fn apply_rules_to_new(tx: &Transaction<'_>, feed_id: i64, new: &[(i64, &NewArticle)]) -> Result<usize> {
+    if new.is_empty() {
+        return Ok(0);
+    }
+    let mut mine = Vec::new();
+    for rule in rules(tx)?.into_iter().filter(|r| r.enabled) {
+        if rule_feeds(tx, &rule)?.contains(&feed_id) {
+            mine.push(rule);
+        }
+    }
+    if mine.is_empty() {
+        return Ok(0);
+    }
+    let mut hits: Vec<(i64, i64)> = mine.iter().map(|r| (r.id, 0)).collect();
+    let (mut read, mut star, mut delete) = (Vec::new(), Vec::new(), Vec::new());
+    for (id, item) in new {
+        let article = rule_article(item.title.clone(), Some(&item.content), &item.excerpt, item.author.clone(), item.url.clone());
+        for (rule, hit) in mine.iter().zip(hits.iter_mut()) {
+            if rule.matches(&article) {
+                hit.1 += 1;
+                match rule.action.as_str() {
+                    "read" => read.push(*id),
+                    "star" => star.push(*id),
+                    _ => delete.push(*id),
+                }
+            }
+        }
+    }
+    // Deleting wins over the other rules.
+    read.retain(|id| !delete.contains(id));
+    star.retain(|id| !delete.contains(id));
+    read.dedup();
+    star.dedup();
+    set_read(tx, &read, true)?;
+    for id in &star {
+        set_starred(tx, *id, true)?;
+    }
+    delete.dedup();
+    delete_articles(tx, &delete)?;
+    for (rule, count) in hits.into_iter().filter(|(_, n)| *n > 0) {
+        tx.execute("UPDATE rules SET hits = hits + ?2 WHERE id = ?1", params![rule, count])?;
+    }
+    Ok(read.len() + delete.len())
+}
+
+/// Stored articles that `rule` matches, `limit` at a time from after the id
+/// `after`: the matching ids, and the last id looked at (None when done).
+/// Starred articles are never marked read or deleted by a rule, and articles the
+/// action would not change are left out.
+pub fn rule_batch(conn: &Connection, rule: &Rule, feeds: &[i64], after: i64, limit: usize) -> Result<(Vec<i64>, Option<i64>)> {
+    if feeds.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    let skip = match rule.action.as_str() {
+        "read" => "AND is_read = 0 AND is_starred = 0",
+        "star" => "AND is_starred = 0",
+        _ => "AND is_starred = 0",
+    };
+    let sql = format!(
+        "SELECT id, title, content, excerpt, author, url FROM articles
+         WHERE is_deleted = 0 {skip} AND id > ?1 AND feed_id IN ({})
+         ORDER BY id LIMIT {limit}",
+        feeds.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([after])?;
+    let (mut matched, mut last, mut seen) = (Vec::new(), None, 0);
+    while let Some(r) = rows.next()? {
+        let id: i64 = r.get(0)?;
+        let content: Option<String> = r.get(2)?;
+        let excerpt: Option<String> = r.get(3)?;
+        let article = rule_article(r.get(1)?, content.as_deref(), excerpt.as_deref().unwrap_or(""), r.get(4)?, r.get(5)?);
+        if rule.matches(&article) {
+            matched.push(id);
+        }
+        last = Some(id);
+        seen += 1;
+    }
+    Ok((matched, if seen < limit { None } else { last }))
+}
+
+/// Does what `rule` says to the articles `ids`, and counts them as its hits.
+pub fn apply_rule_to(conn: &Connection, rule: &Rule, ids: &[i64]) -> Result<()> {
+    match rule.action.as_str() {
+        "read" => set_read(conn, ids, true)?,
+        "star" => {
+            for id in ids {
+                set_starred(conn, *id, true)?;
+            }
+        }
+        _ => delete_articles(conn, ids)?,
+    }
+    conn.execute("UPDATE rules SET hits = hits + ?2 WHERE id = ?1", params![rule.id, ids.len() as i64])?;
+    Ok(())
 }
 
 pub fn update_feed_meta(tx: &Transaction<'_>, id: i64, meta: &FeedMeta) -> Result<()> {
@@ -1132,6 +1536,29 @@ pub fn feed_id_by_url(conn: &Connection, url: &str) -> Result<Option<i64>> {
         .optional()?)
 }
 
+/// Where a feed is, for comparing an OPML file with the subscriptions.
+#[derive(Debug)]
+pub struct FeedPlace {
+    pub id: i64,
+    pub url: String,
+    pub folder_id: Option<i64>,
+    /// Display title: custom title, else feed title, else URL.
+    pub title: String,
+}
+
+pub fn feed_places(conn: &Connection) -> Result<Vec<FeedPlace>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, url, folder_id, COALESCE(NULLIF(custom_title, ''), NULLIF(title, ''), url) FROM feeds ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let (url, title): (String, String) = (r.get(1)?, r.get(3)?);
+        // As in `feed_from_row`: a password in the address must not show.
+        let title = if title == url { crate::net::without_credentials(&url) } else { title };
+        Ok(FeedPlace { id: r.get(0)?, url, folder_id: r.get(2)?, title })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub fn insert_feed(
     conn: &Connection,
     url: &str,
@@ -1213,6 +1640,22 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
         move_feed(conn, id, patch.folder_id, None)?;
     }
     Ok(())
+}
+
+/// Sets the type of several feeds: one of `feed_types::TYPES`, or `None` to go back
+/// to the detected type. Returns how many feeds changed.
+pub fn set_feed_type(conn: &Connection, ids: &[i64], feed_type: Option<&str>) -> Result<usize> {
+    if feed_type.is_some_and(|t| !feed_types::is_type(t)) {
+        return Err(Error::msg("Unknown feed type"));
+    }
+    let mut changed = 0;
+    for chunk in ids.chunks(500) {
+        let sql = format!("UPDATE feeds SET type_override = ? WHERE id IN ({})", placeholders(chunk.len()));
+        let mut args: Vec<Value> = vec![feed_type.map_or(Value::Null, |t| Value::Text(t.into()))];
+        args.extend(chunk.iter().map(|id| Value::Integer(*id)));
+        changed += conn.execute(&sql, params_from_iter(args))?;
+    }
+    Ok(changed)
 }
 
 pub fn delete_feed(conn: &Connection, id: i64) -> Result<()> {
@@ -1314,20 +1757,6 @@ pub fn create_folder(conn: &Connection, title: &str, parent_id: Option<i64>) -> 
         params![title, parent_id, position],
     )?;
     Ok(conn.last_insert_rowid())
-}
-
-pub fn find_or_create_folder(conn: &Connection, title: &str, parent_id: Option<i64>) -> Result<(i64, bool)> {
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM folders WHERE parent_id IS ?1 AND title = ?2",
-            params![parent_id, title],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match existing {
-        Some(id) => Ok((id, false)),
-        None => Ok((create_folder(conn, title, parent_id)?, true)),
-    }
 }
 
 pub fn rename_folder(conn: &Connection, id: i64, title: &str) -> Result<()> {
