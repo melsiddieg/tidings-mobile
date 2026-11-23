@@ -276,6 +276,10 @@
     opacity: 0;
     transition: opacity 0.25s var(--ease);
   }
+  :global([data-platform='ios']) .app {
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+      env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  }
   .app.ready {
     opacity: 1;
   }

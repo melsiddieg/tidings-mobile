@@ -33,6 +33,7 @@
 <audio
   bind:this={audio}
   preload="metadata"
+  playsinline
   ontimeupdate={() => player.onTime()}
   ondurationchange={() => audio && Number.isFinite(audio.duration) && (player.duration = audio.duration)}
   onplay={() => player.onPlay()}

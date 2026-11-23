@@ -9,9 +9,10 @@
 //! - hands every request to the same media proxy as `tidings://localhost/media/`,
 //!   so tracker stripping, the proxy setting and private-address checks still apply.
 //!
-//! Used wherever Tauri renders with WebKitGTK (`cfg(webkitgtk)`, set in build.rs):
-//! Linux, FreeBSD and OpenBSD. macOS plays `tidings://` directly.
-#![cfg_attr(not(webkitgtk), allow(dead_code))]
+//! Used wherever the web view cannot stream byte-ranged media from `tidings://`:
+//! WebKitGTK (Linux, FreeBSD, OpenBSD), Android WebView, and iOS WKWebView.
+//! macOS plays `tidings://` directly.
+#![cfg_attr(not(any(webkitgtk, target_os = "android", target_os = "ios")), allow(dead_code))]
 
 use std::future::Future;
 use std::pin::Pin;

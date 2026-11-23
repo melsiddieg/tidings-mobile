@@ -72,7 +72,7 @@
     z-index: 1000;
     min-width: 210px;
     max-width: 320px;
-    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     overflow-y: auto;
     padding: 5px;
     border-radius: 11px;

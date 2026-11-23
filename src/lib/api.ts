@@ -162,7 +162,7 @@ export function iconUrl(feedId: number, version: number | null): string | null {
 
 let mediaBase: string | null = null;
 
-/** Set at startup on Linux and Android, where audio must come from the loopback server. */
+/** Set at startup on Linux, Android, and iOS, where audio must come from the loopback server. */
 export function setMediaBase(base: string | null | undefined) {
   mediaBase = base ?? null;
 }

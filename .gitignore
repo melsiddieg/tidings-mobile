@@ -3,7 +3,12 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/gen/android/app/src/main/assets/
+src-tauri/gen/apple/assets/*
+!src-tauri/gen/apple/assets/.gitkeep
+src-tauri/gen/apple/Pods/
 *.apk
+*.ipa
+*.xcarchive
 .DS_Store
 *.log
 release/

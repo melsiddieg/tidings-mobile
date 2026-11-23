@@ -110,10 +110,15 @@ impl AppState {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700));
         }
-        // Clean up any temporary staging files from an interrupted Android backup/restore.
+        #[cfg(target_os = "ios")]
+        ios_protect_path(&data_dir);
+        // Clean up any temporary staging files from an interrupted mobile backup/restore.
         let _ = std::fs::remove_file(data_dir.join(crate::commands::RESTORE_STAGE_FILE));
         let _ = std::fs::remove_file(data_dir.join(crate::commands::BACKUP_EXPORT_STAGE_FILE));
-        let conn = db::open(&data_dir.join("tidings.db"))?;
+        let db_path = data_dir.join("tidings.db");
+        let conn = db::open(&db_path)?;
+        #[cfg(target_os = "ios")]
+        ios_protect_path(&db_path);
         db::clear_new_flags(&conn)?;
         // If the saved settings or the proxy in them cannot be used, do not connect
         // directly instead: that would send everything around the proxy (Tor). Stay
@@ -215,5 +220,30 @@ impl AppState {
         *self.settings.write().unwrap_or_else(|e| e.into_inner()) = new;
         *self.startup_warning.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
+    }
+}
+
+/// Excludes `path` from iCloud/Finder backups and applies iOS Data Protection
+/// (`NSFileProtectionCompleteUntilFirstUserAuthentication`) so `tidings.db`
+/// (which holds feed credentials and proxy settings) stays hardware-encrypted
+/// at rest while still permitting background audio playback when locked.
+#[cfg(target_os = "ios")]
+fn ios_protect_path(path: &std::path::Path) {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{
+        NSDictionary, NSFileManager, NSFileProtectionCompleteUntilFirstUserAuthentication,
+        NSFileProtectionKey, NSNumber, NSString, NSURLIsExcludedFromBackupKey, NSURL,
+    };
+
+    let Some(path_str) = path.to_str() else { return };
+    let ns_path = NSString::from_str(path_str);
+    let url = NSURL::fileURLWithPath(&ns_path);
+    let yes = NSNumber::numberWithBool(true);
+    let yes_obj: &AnyObject = &yes;
+    unsafe {
+        let _ = url.setResourceValue_forKey_error(Some(yes_obj), NSURLIsExcludedFromBackupKey);
+        let protection_obj: &AnyObject = NSFileProtectionCompleteUntilFirstUserAuthentication;
+        let attrs = NSDictionary::from_slices(&[NSFileProtectionKey], &[protection_obj]);
+        let _ = NSFileManager::defaultManager().setAttributes_ofItemAtPath_error(&attrs, &ns_path);
     }
 }

@@ -205,6 +205,12 @@
       transition: transform 0.22s var(--ease-out);
       box-shadow: var(--shadow-lg);
     }
+    :global([data-platform='ios']) .sidebar-drawer {
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      background: var(--bg-sidebar);
+    }
     .workspace.sidebar-open .sidebar-drawer {
       transform: translateX(0);
     }

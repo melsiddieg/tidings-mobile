@@ -25,10 +25,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::borrow::Cow;
 use std::collections::HashSet;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::hash::{BuildHasher, RandomState};
 use std::io::Cursor;
 use std::num::NonZeroU64;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -40,9 +41,11 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits};
 use resvg::usvg::fontdb;
 use resvg::{tiny_skia, usvg};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 
@@ -91,6 +94,7 @@ const WORKER_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 
 /// for each layer.
 const WORKER_MEMORY: usize = 512 * 1024 * 1024;
 /// A PNG from the helper is never larger than this.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 const MAX_PNG_BYTES: usize = 64 * 1024 * 1024;
 /// SVG files that stopped the helper are remembered, up to this many.
 const MAX_REFUSED: usize = 256;
@@ -187,6 +191,7 @@ fn still(bytes: &[u8], format: ImageFormat, usage: Use, lossy: bool) -> Option<C
 // ---------------------------------------------------------------------------
 
 /// The app's side of the helper process.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct Worker {
     /// Kept so the process is stopped when this is dropped (`kill_on_drop`).
     _child: Child,
@@ -195,6 +200,7 @@ struct Worker {
 }
 
 /// Why the helper gave no answer.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 enum Failure {
     /// It could not be started.
     NoHelper,
@@ -202,6 +208,7 @@ enum Failure {
     Stopped,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Default)]
 struct Drawer {
     worker: Option<Worker>,
@@ -211,6 +218,7 @@ struct Drawer {
 }
 
 /// Starts the program again as the SVG helper.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn worker_command() -> std::io::Result<Command> {
     let mut command = Command::new(std::env::current_exe()?);
     #[cfg(not(test))]
@@ -223,6 +231,7 @@ fn worker_command() -> std::io::Result<Command> {
     Ok(command)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl Worker {
     async fn start() -> std::io::Result<Worker> {
         let not_helper = || std::io::Error::other("the SVG helper did not start");
@@ -271,6 +280,7 @@ impl Worker {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl Drawer {
     async fn request(&mut self, bytes: &[u8], usage: Use) -> Result<Option<Vec<u8>>, Failure> {
         // A helper kept from an earlier image may have stopped since, for a reason
@@ -311,7 +321,7 @@ pub(crate) static HELPER_TESTS: Mutex<()> = Mutex::const_new(());
 /// the SVG is refused, when it stops the helper (a crash, or too much memory) and
 /// when it takes too long. The helper is then stopped, and the next SVG starts a
 /// new one.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
     static DRAWER: LazyLock<Mutex<Drawer>> = LazyLock::new(Mutex::default);
     static KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
@@ -342,9 +352,9 @@ async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
     }
 }
 
-/// Quick pre-check on raw SVG XML bytes before handing to `usvg` in-process on Android:
+/// Quick pre-check on raw SVG XML bytes before handing to `usvg` in-process on mobile:
 /// rejects excessive tag nesting (> 64 open elements) or excessive `<use` references.
-#[cfg(any(target_os = "android", test))]
+#[cfg(any(target_os = "android", target_os = "ios", test))]
 fn svg_precheck_ok(bytes: &[u8]) -> bool {
     const MAX_DEPTH: usize = 64;
     const MAX_USES: usize = 64;
@@ -401,17 +411,17 @@ fn svg_precheck_ok(bytes: &[u8]) -> bool {
     true
 }
 
-/// On Android, the app runs inside the Zygote process rather than a standalone
-/// executable. To prevent malicious article SVGs from crashing or exhausting memory
-/// in-process, SVGs are only rasterized for small feed icons (`Use::Icon`), serialized
-/// one at a time, pre-checked for XML depth, and remembered in a refusal cache on timeout.
-#[cfg(target_os = "android")]
+/// On Android and iOS, apps cannot spawn standalone helper child processes.
+/// To prevent malicious article SVGs from crashing or exhausting memory in-process,
+/// SVGs are only rasterized for small feed icons (`Use::Icon`), serialized one at a
+/// time, pre-checked for XML depth, and remembered in a refusal cache on timeout.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
     use std::hash::{BuildHasher, RandomState};
     use tokio::sync::Mutex;
 
-    const MAX_ANDROID_ICON_SVG: usize = 256 * 1024;
-    if usage != Use::Icon || bytes.len() > MAX_ANDROID_ICON_SVG || !svg_precheck_ok(bytes) {
+    const MAX_MOBILE_ICON_SVG: usize = 256 * 1024;
+    if usage != Use::Icon || bytes.len() > MAX_MOBILE_ICON_SVG || !svg_precheck_ok(bytes) {
         return None;
     }
     static LOCK: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -611,7 +621,9 @@ fn fonts() -> Arc<fontdb::Database> {
 /// few thousand levels overflow the stack. So outside the helper this draws
 /// nothing (the tests call it directly, with drawings that are safe).
 pub(crate) fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
-    if bytes.len() > MAX_SVG_BYTES || !(cfg!(test) || cfg!(target_os = "android") || Capped::is_helper()) {
+    if bytes.len() > MAX_SVG_BYTES
+        || !(cfg!(test) || cfg!(any(target_os = "android", target_os = "ios")) || Capped::is_helper())
+    {
         return None;
     }
     let options = usvg::Options {

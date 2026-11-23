@@ -48,11 +48,13 @@ fn is_app_url(url: &Url) -> bool {
     match url.scheme() {
         "tauri" => url.host_str() == Some("localhost"),
         "http" | "https" => {
-            // Release builds on Linux and macOS use tauri://localhost; on Android
+            // Release builds on Linux, macOS and iOS use tauri://localhost; on Android
             // wry serves the app from http://tauri.localhost.
             // The dev server is only allowed in debug builds.
             (cfg!(target_os = "android") && url.host_str() == Some("tauri.localhost"))
-                || (cfg!(debug_assertions) && matches!(url.host_str(), Some("localhost") | Some("127.0.0.1")))
+                || (cfg!(debug_assertions)
+                    && (matches!(url.host_str(), Some("localhost") | Some("127.0.0.1"))
+                        || (cfg!(mobile) && url.port() == Some(1420) && !net::host_looks_public(url))))
         }
         "about" => url.as_str() == "about:blank",
         _ => false,
@@ -62,6 +64,8 @@ fn is_app_url(url: &Url) -> bool {
 fn build_main_window(app: &tauri::App) -> tauri::Result<()> {
     let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
         .on_navigation(is_app_url);
+    #[cfg(target_os = "ios")]
+    let builder = builder.background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
     #[cfg(desktop)]
     let builder = builder
         .title("Tidings")
@@ -109,10 +113,10 @@ fn android_cert_workarounds() {
     }
 }
 
-/// WebKitGTK and Android WebView cannot stream byte-ranged media from the tidings://
-/// scheme, so they get audio and video from a token-protected server on 127.0.0.1
-/// (see media_server.rs).
-#[cfg(any(webkitgtk, target_os = "android"))]
+/// WebKitGTK, Android WebView, and iOS AVFoundation/WKWebView cannot reliably stream
+/// byte-ranged media from the tidings:// scheme, so they get audio and video from a
+/// token-protected server on 127.0.0.1 (see media_server.rs).
+#[cfg(any(webkitgtk, target_os = "android", target_os = "ios"))]
 fn start_media_server(app: &tauri::AppHandle, state: &Arc<state::AppState>) {
     let handle = app.clone();
     let handler: media_server::Handler = Arc::new(move |encoded, range| {
@@ -278,7 +282,7 @@ pub fn run() {
             app.manage(state.clone());
             #[cfg(target_os = "macos")]
             app.set_menu(menu::build(app.handle())?)?;
-            #[cfg(any(webkitgtk, target_os = "android"))]
+            #[cfg(any(webkitgtk, target_os = "android", target_os = "ios"))]
             start_media_server(app.handle(), &state);
             build_main_window(app)?;
             scheduler::start(app.handle().clone(), state);

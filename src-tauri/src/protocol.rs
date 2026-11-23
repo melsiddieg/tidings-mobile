@@ -96,8 +96,8 @@ fn decode_target(encoded: &str) -> Result<String, StatusCode> {
     Ok(target)
 }
 
-/// Media for the loopback server on Linux and the BSDs (see media_server.rs); same rules as `tidings://`.
-#[cfg_attr(not(webkitgtk), allow(dead_code))]
+/// Media for the loopback server on Linux, BSDs, Android, and iOS (see media_server.rs); same rules as `tidings://`.
+#[cfg_attr(not(any(webkitgtk, target_os = "android", target_os = "ios")), allow(dead_code))]
 pub async fn media_response(app: &AppHandle, encoded: &str, range: Option<&str>) -> Response<Vec<u8>> {
     let Some(state) = app.try_state::<Arc<AppState>>() else {
         return empty(StatusCode::SERVICE_UNAVAILABLE);

@@ -21,13 +21,13 @@ use crate::error::{Error, Result};
 use crate::net::{self, Net};
 use crate::video;
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 const RELEASES_PAGE: &str = "https://github.com/melsiddieg/tidings-mobile/releases/latest";
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 const RELEASES_PAGE: &str = "https://github.com/melsiddieg/tidings/releases/latest";
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 const TIDINGS_API: &str = "https://api.github.com/repos/melsiddieg/tidings-mobile/releases/latest";
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 const TIDINGS_API: &str = "https://api.github.com/repos/melsiddieg/tidings/releases/latest";
 const YT_DLP_API: &str = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 const WEBKIT_ADVISORIES: &str = "https://webkitgtk.org/security.html";
@@ -84,7 +84,7 @@ pub struct Seen {
 /// what it saw, to remember. Without, it starts no program: it uses `seen` if that
 /// file has not changed since, and says so otherwise.
 pub fn check_offline(today: NaiveDate, run: bool, seen: Option<Seen>) -> (Vec<Component>, Option<Seen>) {
-    if cfg!(target_os = "android") {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
         return (vec![tidings(today), webkit(today)], None);
     }
     let (yt_dlp, seen) = if run { yt_dlp(today) } else { (yt_dlp_remembered(today, seen), None) };
@@ -96,7 +96,7 @@ pub fn check_offline(today: NaiveDate, run: bool, seen: Option<Seen>) -> (Vec<Co
 pub async fn check_online(net: &Net, today: NaiveDate) -> (Vec<Component>, Option<Seen>) {
     let (mut list, seen) =
         tokio::task::spawn_blocking(move || check_offline(today, true, None)).await.unwrap_or_default();
-    // On macOS, WebKit comes with the system: there is no advisory to ask for.
+    // On macOS and iOS, WebKit comes with the system: there is no advisory to ask for.
     let advisory = async {
         if cfg!(webkitgtk) {
             latest_advisory(net).await
@@ -105,7 +105,7 @@ pub async fn check_online(net: &Net, today: NaiveDate) -> (Vec<Component>, Optio
         }
     };
     let yt_dlp_fut = async {
-        if cfg!(target_os = "android") {
+        if cfg!(any(target_os = "android", target_os = "ios")) {
             None
         } else {
             latest_release(net, YT_DLP_API).await
@@ -129,6 +129,7 @@ pub async fn check_online(net: &Net, today: NaiveDate) -> (Vec<Component>, Optio
 enum Install {
     MacApp,
     Android,
+    Ios,
     Flatpak,
     Snap,
     AppImage,
@@ -143,6 +144,8 @@ fn install() -> Install {
         Install::MacApp
     } else if cfg!(target_os = "android") {
         Install::Android
+    } else if cfg!(target_os = "ios") {
+        Install::Ios
     } else if std::env::var_os("FLATPAK_ID").is_some() || Path::new("/.flatpak-info").exists() {
         Install::Flatpak
     } else if std::env::var_os("SNAP").is_some() {
@@ -161,6 +164,7 @@ fn tidings_update() -> (&'static str, Option<&'static str>, Option<&'static str>
     match install() {
         Install::MacApp => ("Download the newest .dmg from the releases page.", None, Some(RELEASES_PAGE)),
         Install::Android => ("Download the newest .apk from the releases page.", None, Some(RELEASES_PAGE)),
+        Install::Ios => ("Build or download the newest iOS release from the releases page.", None, Some(RELEASES_PAGE)),
         Install::Flatpak => ("Update it in your software center, or run:", Some("flatpak update"), None),
         Install::Snap => ("Update it in your software center, or run:", Some("sudo snap refresh"), None),
         Install::AppImage => (
@@ -440,6 +444,20 @@ fn webkit(today: NaiveDate) -> Component {
             status: Status::Info,
             message: "Android System WebView, which shows articles, gets its security fixes \
                       from Google Play and Android system updates."
+                .into(),
+            command: None,
+            link: None,
+        };
+    }
+    if cfg!(target_os = "ios") {
+        return Component {
+            id: "webkit",
+            name: "WebKit".into(),
+            version: None,
+            detail: Some("part of iOS".into()),
+            status: Status::Info,
+            message: "WebKit, which shows articles, comes with iOS and gets its security fixes \
+                      from iOS updates: Settings → General → Software Update."
                 .into(),
             command: None,
             link: None,

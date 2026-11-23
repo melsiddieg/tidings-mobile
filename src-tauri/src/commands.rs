@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(any(desktop, target_os = "android"))]
+use tauri::Manager;
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::backup;
@@ -454,6 +456,28 @@ pub fn refresh_feeds(
 // OPML
 // ---------------------------------------------------------------------------
 
+fn direct_path(file_path: &tauri_plugin_dialog::FilePath) -> Option<std::path::PathBuf> {
+    // On iOS, file picker / save dialogs return security-scoped file:// URLs outside
+    // the app sandbox. Opening them directly (or writing sibling .tmp files) fails
+    // with EPERM unless accessed through tauri-plugin-fs, which calls
+    // startAccessingSecurityScopedResource().
+    if cfg!(target_os = "ios") {
+        None
+    } else {
+        file_path.clone().into_path().ok()
+    }
+}
+
+fn finish_scoped_access(app: &AppHandle, file_path: tauri_plugin_dialog::FilePath) {
+    #[cfg(target_os = "ios")]
+    {
+        use tauri_plugin_fs::FsExt;
+        let _ = app.fs().stop_accessing_security_scoped_resource(file_path);
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = (app, file_path);
+}
+
 fn display_file_name(file_path: &tauri_plugin_dialog::FilePath, fallback: &str) -> String {
     if let Ok(path) = file_path.clone().into_path() {
         if let Some(name) = path.file_name() {
@@ -513,23 +537,27 @@ pub async fn preview_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Opti
     });
     let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
     let name = display_file_name(&file_path, "subscriptions.opml");
-    let bytes = match file_path.clone().into_path() {
-        Ok(path) => {
+    let bytes = match direct_path(&file_path) {
+        Some(path) => {
             if std::fs::metadata(&path)?.len() > 20 * 1024 * 1024 {
                 return Err(Error::msg("This file is too large to be an OPML subscription list"));
             }
             std::fs::read(&path)?
         }
-        Err(_) => {
+        None => {
             use std::io::Read;
             const MAX_OPML_BYTES: u64 = 20 * 1024 * 1024;
-            let file = app.fs().open(file_path, tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
-            let mut data = Vec::new();
-            file.take(MAX_OPML_BYTES + 1).read_to_end(&mut data)?;
-            if data.len() as u64 > MAX_OPML_BYTES {
-                return Err(Error::msg("This file is too large to be an OPML subscription list"));
-            }
-            data
+            let read_res = (|| -> Result<Vec<u8>> {
+                let file = app.fs().open(file_path.clone(), tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
+                let mut data = Vec::new();
+                file.take(MAX_OPML_BYTES + 1).read_to_end(&mut data)?;
+                if data.len() as u64 > MAX_OPML_BYTES {
+                    return Err(Error::msg("This file is too large to be an OPML subscription list"));
+                }
+                Ok(data)
+            })();
+            finish_scoped_access(&app, file_path);
+            read_res?
         }
     };
     // Parsing is CPU work on a file from anywhere: keep it off the async threads.
@@ -588,17 +616,23 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
         let _ = tx.send(path);
     });
     let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
-    match file_path.clone().into_path() {
-        Ok(path) => {
+    match direct_path(&file_path) {
+        Some(path) => {
             files::write_private(&path, xml.as_bytes())?;
             Ok(Some(path.display().to_string()))
         }
-        Err(_) => {
+        None => {
             let display = display_file_name(&file_path, "tidings-subscriptions.opml");
-            let mut options = tauri_plugin_fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            let mut file = app.fs().open(file_path, options)?;
-            file.write_all(xml.as_bytes())?;
+            let write_res = (|| -> Result<()> {
+                let mut options = tauri_plugin_fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                let mut file = app.fs().open(file_path.clone(), options)?;
+                file.write_all(xml.as_bytes())?;
+                file.flush()?;
+                Ok(())
+            })();
+            finish_scoped_access(&app, file_path);
+            write_res?;
             Ok(Some(display))
         }
     }
@@ -642,8 +676,8 @@ pub async fn backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<Str
     });
     let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
     let source = state.db_path();
-    match file_path.clone().into_path() {
-        Ok(path) => {
+    match direct_path(&file_path) {
+        Some(path) => {
             let target = path.clone();
             // A second, read-only connection: the app keeps working while the copy is made.
             tokio::task::spawn_blocking(move || -> Result<()> {
@@ -658,7 +692,7 @@ pub async fn backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<Str
             .map_err(|e| Error::msg(e.to_string()))??;
             Ok(Some(path.display().to_string()))
         }
-        Err(_) => {
+        None => {
             let display = display_file_name(&file_path, &filename);
             let temp_target = state.data_dir.join(BACKUP_EXPORT_STAGE_FILE);
             let temp_for_copy = temp_target.clone();
@@ -680,11 +714,12 @@ pub async fn backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<Str
                 let mut src = std::fs::File::open(&temp_target)?;
                 let mut options = tauri_plugin_fs::OpenOptions::new();
                 options.write(true).create(true).truncate(true);
-                let mut dst = app.fs().open(file_path, options)?;
+                let mut dst = app.fs().open(file_path.clone(), options)?;
                 std::io::copy(&mut src, &mut dst)?;
                 dst.flush()?;
                 Ok(())
             })();
+            finish_scoped_access(&app, file_path);
             let _ = std::fs::remove_file(&temp_target);
             write_res?;
             Ok(Some(display))
@@ -714,31 +749,36 @@ pub async fn choose_backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Opt
     });
     let Some(file_path) = rx.await.ok().flatten() else { return Ok(None) };
     let display_name = display_file_name(&file_path, "backup.tidings");
-    let (path, is_staged) = match file_path.clone().into_path() {
-        Ok(path) => (path, false),
-        Err(_) => {
+    let (path, is_staged) = match direct_path(&file_path) {
+        Some(path) => (path, false),
+        None => {
             use std::io::Read;
             let staged = state.data_dir.join(RESTORE_STAGE_FILE);
-            let src = app.fs().open(file_path, tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
-            let (temp, mut dst) = files::private_temp(&staged)?;
-            let mut limited = src.take(MAX_BACKUP_STAGE_BYTES + 1);
-            let copied = std::io::copy(&mut limited, &mut dst);
-            match copied {
-                Ok(n) if n > MAX_BACKUP_STAGE_BYTES => {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(Error::msg("This backup file is too large to import (limit 512 MB)"));
-                }
-                Ok(_) => {
-                    if let Err(err) = dst.sync_all().and_then(|()| std::fs::rename(&temp, &staged)) {
+            let stage_res = (|| -> Result<()> {
+                let src = app.fs().open(file_path.clone(), tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
+                let (temp, mut dst) = files::private_temp(&staged)?;
+                let mut limited = src.take(MAX_BACKUP_STAGE_BYTES + 1);
+                let copied = std::io::copy(&mut limited, &mut dst);
+                match copied {
+                    Ok(n) if n > MAX_BACKUP_STAGE_BYTES => {
                         let _ = std::fs::remove_file(&temp);
-                        return Err(err.into());
+                        Err(Error::msg("This backup file is too large to import (limit 512 MB)"))
+                    }
+                    Ok(_) => {
+                        if let Err(err) = dst.sync_all().and_then(|()| std::fs::rename(&temp, &staged)) {
+                            let _ = std::fs::remove_file(&temp);
+                            return Err(err.into());
+                        }
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let _ = std::fs::remove_file(&temp);
+                        Err(err.into())
                     }
                 }
-                Err(err) => {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(err.into());
-                }
-            }
+            })();
+            finish_scoped_access(&app, file_path);
+            stage_res?;
             (staged, true)
         }
     };
@@ -834,7 +874,7 @@ pub async fn export_starred(app: AppHandle, state: AppStateRef<'_>, format: Stri
     if db::tree(&state.db())?.starred == 0 {
         return Err(Error::msg("There are no starred articles to export"));
     }
-    let (extension, label) = if markdown { ("md", "Markdown") } else { ("html", "HTML") };
+    let (extension, _label) = if markdown { ("md", "Markdown") } else { ("html", "HTML") };
     let filename = format!("tidings-starred-{}.{extension}", today());
     let (tx, rx) = tokio::sync::oneshot::channel();
     let dialog = app
@@ -843,9 +883,9 @@ pub async fn export_starred(app: AppHandle, state: AppStateRef<'_>, format: Stri
         .set_title("Export starred articles")
         .set_file_name(&filename);
     #[cfg(desktop)]
-    let dialog = dialog.add_filter(label, &[extension]);
+    let dialog = dialog.add_filter(_label, &[extension]);
     #[cfg(target_os = "android")]
-    let dialog = dialog.add_filter(label, &[if markdown { "text/plain" } else { "text/html" }]);
+    let dialog = dialog.add_filter(_label, &[if markdown { "text/plain" } else { "text/html" }]);
     #[cfg(desktop)]
     let dialog = match app.get_webview_window("main") {
         Some(window) => dialog.set_parent(&window),
@@ -862,17 +902,23 @@ pub async fn export_starred(app: AppHandle, state: AppStateRef<'_>, format: Stri
     })
     .await
     .map_err(|e| Error::msg(e.to_string()))?;
-    match file_path.clone().into_path() {
-        Ok(path) => {
+    match direct_path(&file_path) {
+        Some(path) => {
             files::write_private(&path, text.as_bytes())?;
             Ok(Some(path.display().to_string()))
         }
-        Err(_) => {
+        None => {
             let display = display_file_name(&file_path, &filename);
-            let mut options = tauri_plugin_fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            let mut file = app.fs().open(file_path, options)?;
-            file.write_all(text.as_bytes())?;
+            let write_res = (|| -> Result<()> {
+                let mut options = tauri_plugin_fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                let mut file = app.fs().open(file_path.clone(), options)?;
+                file.write_all(text.as_bytes())?;
+                file.flush()?;
+                Ok(())
+            })();
+            finish_scoped_access(&app, file_path);
+            write_res?;
             Ok(Some(display))
         }
     }
@@ -909,7 +955,33 @@ pub fn open_external(app: AppHandle, url: String) -> Result<()> {
         }
         return Ok(());
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        let url_str = parsed.to_string();
+        app.run_on_main_thread(move || {
+            use objc2::runtime::AnyObject;
+            use objc2::MainThreadMarker;
+            use objc2_foundation::{NSDictionary, NSString, NSURL};
+            use objc2_ui_kit::UIApplication;
+
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let ns_str = NSString::from_str(&url_str);
+            let Some(ns_url) = NSURL::URLWithString(&ns_str) else { return };
+            let options: objc2::rc::Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
+            let ui_app = UIApplication::sharedApplication(mtm);
+            unsafe {
+                let _: () = objc2::msg_send![
+                    &*ui_app,
+                    openURL: &*ns_url,
+                    options: &*options,
+                    completionHandler: std::ptr::null::<std::ffi::c_void>()
+                ];
+            }
+        })
+        .map_err(|e| Error::msg(e.to_string()))?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         open::that_detached(parsed.as_str())?;

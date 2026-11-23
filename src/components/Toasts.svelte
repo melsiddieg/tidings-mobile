@@ -18,7 +18,7 @@
   .toasts {
     position: fixed;
     left: 50%;
-    bottom: 20px;
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
     transform: translateX(-50%);
     z-index: 1100;
     display: grid;

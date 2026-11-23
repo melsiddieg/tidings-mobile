@@ -94,11 +94,12 @@
   }
   @media (max-width: 860px) {
     .backdrop {
-      padding: 12px;
+      padding: max(12px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px))
+        max(12px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
     }
     .modal {
       width: 100% !important;
-      max-height: calc(100dvh - 24px);
+      max-height: calc(100dvh - max(24px, env(safe-area-inset-top, 0px) + env(safe-area-inset-bottom, 0px) + 16px));
     }
     .body.padded {
       padding: 12px 16px 16px;

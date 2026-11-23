@@ -1141,3 +1141,21 @@ kbd {
     height: 36px;
   }
 }
+
+/* iOS touch ergonomics & input auto-zoom prevention */
+[data-platform='ios'] button,
+[data-platform='ios'] a,
+[data-platform='ios'] .tree-row {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+[data-platform='ios'] .prose,
+[data-platform='ios'] input,
+[data-platform='ios'] textarea {
+  -webkit-touch-callout: default;
+}
+[data-platform='ios'] input:not([type='range']):not([type='checkbox']):not([type='radio']),
+[data-platform='ios'] select,
+[data-platform='ios'] textarea {
+  font-size: 16px;
+}
