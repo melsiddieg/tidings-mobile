@@ -49,15 +49,50 @@ Apple requires an iOS code-signing identity to install apps onto a physical iPho
    ```
 7. On first launch with a Personal Team certificate, trust your developer profile on the iPhone under **Settings → General → VPN & Device Management**.
 
-## Unsigned Compile & Link Verification (No Signing Identity Needed)
+## Direct CLI Release Build & USB Install (No Simulator Runtime Needed)
 
-To verify the frontend, Rust ARM64 iOS static library, Objective-C++ bridge, and Mach-O link without a signing identity:
+If you want to build an optimized standalone release `Tidings.app` and install it directly onto a connected iPhone without downloading Xcode's ~8 GB iOS Simulator runtime:
+
+```bash
+# 1. Build production frontend and ARM64 iOS release staticlib
+npm run build
+IPHONEOS_DEPLOYMENT_TARGET=15.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) \
+  cargo rustc --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios \
+  --release --lib --crate-type staticlib --features tauri/custom-protocol
+mkdir -p src-tauri/gen/apple/Externals/arm64/release
+cp src-tauri/target/aarch64-apple-ios/release/libtidings_lib.a \
+  src-tauri/gen/apple/Externals/arm64/release/libapp.a
+
+# 2. Sign and package Tidings.app with your Apple Team ID & iPhone UDID
+#    (Find UDID with `xcrun devicectl list devices`; Team ID via Xcode Accounts)
+xcodebuild \
+  -project src-tauri/gen/apple/tidings.xcodeproj \
+  -scheme tidings_iOS \
+  -configuration release \
+  -sdk iphoneos \
+  -destination "id=<YOUR_IPHONE_UDID>" \
+  DEVELOPMENT_TEAM=<YOUR_TEAM_ID> \
+  CODE_SIGN_STYLE=Automatic \
+  -allowProvisioningUpdates \
+  TIDINGS_SKIP_RUST_BUILD=1 \
+  -derivedDataPath src-tauri/gen/apple/build/DerivedData \
+  build
+
+# 3. Install onto your connected iPhone
+xcrun devicectl device install app \
+  --device <YOUR_IPHONE_UDID> \
+  src-tauri/gen/apple/build/DerivedData/Build/Products/release-iphoneos/Tidings.app
+```
+
+## Unsigned Compile Verification (No Signing Identity Needed)
+
+To verify the frontend and Rust ARM64 iOS static library without a signing identity:
 
 ```bash
 npm run check && npm run build
-cargo build --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios --lib --features tauri/custom-protocol
-# Or archive via Tauri CLI (requires Xcode's iOS Platform runtime installed):
-npx tauri ios build --debug --ci --no-sign --archive-only
+IPHONEOS_DEPLOYMENT_TARGET=15.0 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path) \
+  cargo rustc --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios \
+  --lib --crate-type staticlib --features tauri/custom-protocol
 ```
 
 ## Regenerating `tidings.xcodeproj`

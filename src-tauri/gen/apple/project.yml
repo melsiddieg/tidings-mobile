@@ -96,6 +96,7 @@ targets:
       - sdk: WebKit.framework
     preBuildScripts:
       - script: |
+          if [ "${TIDINGS_SKIP_RUST_BUILD:-0}" = "1" ]; then exit 0; fi
           npm run -- tauri ios xcode-script -v --platform "${PLATFORM_DISPLAY_NAME:?}" --sdk-root "${SDKROOT:?}" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration "${CONFIGURATION:?}" ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false
