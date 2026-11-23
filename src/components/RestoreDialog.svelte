@@ -1,14 +1,20 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import Modal from './Modal.svelte';
-  import { errorText } from '../lib/api';
+  import { api, errorText } from '../lib/api';
   import { store } from '../lib/store.svelte';
   import type { BackupSummary } from '../lib/types';
 
   let { summary }: { summary: BackupSummary } = $props();
 
   let busy = $state(false);
+  let restored = false;
   let error = $state<string | null>(null);
+
+  onDestroy(() => {
+    if (!restored) api.cancelRestore().catch(() => {});
+  });
 
   const count = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
   const made = $derived(
@@ -28,6 +34,7 @@
     try {
       // Reloads the window when it is done.
       await store.restoreBackup();
+      restored = true;
     } catch (e) {
       error = errorText(e);
       busy = false;

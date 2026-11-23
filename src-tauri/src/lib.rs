@@ -349,6 +349,7 @@ pub fn run() {
             commands::backup,
             commands::choose_backup,
             commands::restore_backup,
+            commands::cancel_restore,
             commands::export_starred,
         ])
         .run(tauri::generate_context!())

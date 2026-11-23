@@ -21,7 +21,13 @@ use crate::error::{Error, Result};
 use crate::net::{self, Net};
 use crate::video;
 
+#[cfg(target_os = "android")]
+const RELEASES_PAGE: &str = "https://github.com/melsiddieg/tidings-mobile/releases/latest";
+#[cfg(not(target_os = "android"))]
 const RELEASES_PAGE: &str = "https://github.com/melsiddieg/tidings/releases/latest";
+#[cfg(target_os = "android")]
+const TIDINGS_API: &str = "https://api.github.com/repos/melsiddieg/tidings-mobile/releases/latest";
+#[cfg(not(target_os = "android"))]
 const TIDINGS_API: &str = "https://api.github.com/repos/melsiddieg/tidings/releases/latest";
 const YT_DLP_API: &str = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 const WEBKIT_ADVISORIES: &str = "https://webkitgtk.org/security.html";
@@ -78,6 +84,9 @@ pub struct Seen {
 /// what it saw, to remember. Without, it starts no program: it uses `seen` if that
 /// file has not changed since, and says so otherwise.
 pub fn check_offline(today: NaiveDate, run: bool, seen: Option<Seen>) -> (Vec<Component>, Option<Seen>) {
+    if cfg!(target_os = "android") {
+        return (vec![tidings(today), webkit(today)], None);
+    }
     let (yt_dlp, seen) = if run { yt_dlp(today) } else { (yt_dlp_remembered(today, seen), None) };
     (vec![tidings(today), yt_dlp, webkit(today)], seen)
 }
@@ -95,7 +104,14 @@ pub async fn check_online(net: &Net, today: NaiveDate) -> (Vec<Component>, Optio
             None
         }
     };
-    let (tidings, yt_dlp, webkit) = tokio::join!(latest_release(net, TIDINGS_API), latest_release(net, YT_DLP_API), advisory);
+    let yt_dlp_fut = async {
+        if cfg!(target_os = "android") {
+            None
+        } else {
+            latest_release(net, YT_DLP_API).await
+        }
+    };
+    let (tidings, yt_dlp, webkit) = tokio::join!(latest_release(net, TIDINGS_API), yt_dlp_fut, advisory);
     for c in &mut list {
         match c.id {
             "tidings" => online_tidings(c, tidings.as_deref()),

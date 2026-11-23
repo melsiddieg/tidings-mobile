@@ -18,7 +18,6 @@ android {
     compileSdk = 37
     namespace = "org.tidings.reader"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "org.tidings.reader"
         minSdk = 24
         targetSdk = 37
@@ -27,7 +26,6 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false

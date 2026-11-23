@@ -251,6 +251,10 @@ impl ResolvedUrls {
     }
 }
 
+fn looks_like_embedded_target(seg: &str) -> bool {
+    seg.contains('.') || seg.starts_with("http:") || seg.starts_with("https:")
+}
+
 /// How many leading path segments of a known podcast tracking redirect to drop.
 /// These services sit in front of the real audio URL to count downloads.
 fn tracker_prefix(host: &str, seg: &[&str]) -> Option<usize> {
@@ -258,8 +262,10 @@ fn tracker_prefix(host: &str, seg: &[&str]) -> Option<usize> {
     match host {
         "dts.podtrac.com" | "podtrac.com" if s(0).starts_with("redirect.") => Some(1),
         "www.podtrac.com" if s(0) == "pts" && s(1).starts_with("redirect.") => Some(2),
-        "chtbl.com" | "chrt.fm" | "tracking.swap.fm" if s(0) == "track" => Some(2),
-        "pdst.fm" | "prfx.byspotify.com" if s(0) == "e" => Some(1),
+        "play.podtrac.com" if !s(0).is_empty() && looks_like_embedded_target(s(1)) => Some(1),
+        "pdrl.fm" if !s(0).is_empty() && looks_like_embedded_target(s(1)) => Some(1),
+        "chtbl.com" | "chrt.fm" | "tracking.swap.fm" | "swap.fm" if s(0) == "track" => Some(2),
+        "pdst.fm" | "prfx.byspotify.com" | "pdcn.co" if s(0) == "e" => Some(1),
         "mgln.ai" if s(0) == "e" => Some(2),
         "op3.dev" if s(0) == "e" || s(0).starts_with("e,") => Some(1),
         "pfx.vpixl.com" => Some(1),
@@ -546,6 +552,14 @@ mod tests {
         assert_eq!(
             strip_trackers("https://www.podtrac.com/pts/redirect.mp3/pdst.fm/e/chtbl.com/track/X/cdn.example.org/ep.m4a"),
             "https://cdn.example.org/ep.m4a"
+        );
+        assert_eq!(
+            strip_trackers("https://pdrl.fm/f3efd0/dts.podtrac.com/redirect.mp3/arttrk.com/p/ST44R/claritaspod.com/measure/stitcher.simplecastaudio.com/ep.mp3?feed=dHoohVNH"),
+            "https://stitcher.simplecastaudio.com/ep.mp3?feed=dHoohVNH"
+        );
+        assert_eq!(
+            strip_trackers("https://tracking.swap.fm/track/XvDEoI11/prfx.byspotify.com/e/play.podtrac.com/npr-344098539/npr.simplecastaudio.com/ep.mp3"),
+            "https://npr.simplecastaudio.com/ep.mp3"
         );
         let plain = "https://aphid.fireside.fm/d/1437767933/c91b/280e.mp3";
         assert_eq!(strip_trackers(plain), plain);

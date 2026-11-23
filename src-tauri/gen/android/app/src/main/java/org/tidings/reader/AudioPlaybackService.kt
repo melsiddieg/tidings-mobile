@@ -22,12 +22,15 @@ class AudioPlaybackService : Service() {
   override fun onCreate() {
     super.onCreate()
     createNotificationChannel()
-    acquireLocks()
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    val title = intent?.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() } ?: "Playing episode"
-    val artist = intent?.getStringExtra(EXTRA_ARTIST)?.takeIf { it.isNotBlank() } ?: "Tidings"
+    if (intent == null) {
+      stopSelf()
+      return START_NOT_STICKY
+    }
+    val title = intent.getStringExtra(EXTRA_TITLE)?.trim()?.take(200)?.takeIf { it.isNotBlank() } ?: "Playing episode"
+    val artist = intent.getStringExtra(EXTRA_ARTIST)?.trim()?.take(200)?.takeIf { it.isNotBlank() } ?: "Tidings"
 
     val notification = buildNotification(title, artist)
     runCatching {
@@ -43,7 +46,13 @@ class AudioPlaybackService : Service() {
       }
     }
     acquireLocks()
-    return START_STICKY
+    return START_NOT_STICKY
+  }
+
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    releaseLocks()
+    stopSelf()
+    super.onTaskRemoved(rootIntent)
   }
 
   override fun onDestroy() {
@@ -125,6 +134,16 @@ class AudioPlaybackService : Service() {
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
+    val publicNotification = NotificationCompat.Builder(this, CHANNEL_ID)
+      .setSmallIcon(R.mipmap.ic_launcher)
+      .setContentTitle("Tidings")
+      .setContentText("Playing audio")
+      .setOngoing(true)
+      .setSilent(true)
+      .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+      .setPriority(NotificationCompat.PRIORITY_LOW)
+      .build()
+
     return NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(R.mipmap.ic_launcher)
       .setContentTitle(title)
@@ -132,7 +151,8 @@ class AudioPlaybackService : Service() {
       .setContentIntent(pendingIntent)
       .setOngoing(true)
       .setSilent(true)
-      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+      .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+      .setPublicVersion(publicNotification)
       .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
       .setPriority(NotificationCompat.PRIORITY_LOW)
       .build()

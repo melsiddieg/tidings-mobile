@@ -106,6 +106,7 @@ export const api = {
   /** Opens a file dialog; the summary of the chosen backup, which `restoreBackup` then restores. */
   chooseBackup: () => call<BackupSummary | null>('choose_backup'),
   restoreBackup: () => call<RestoreResult>('restore_backup'),
+  cancelRestore: () => call<void>('cancel_restore'),
   exportStarred: (format: 'html' | 'markdown', images: boolean) =>
     call<string | null>('export_starred', { format, images }),
   settings: () => call<Settings>('get_settings'),

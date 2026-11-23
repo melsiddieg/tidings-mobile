@@ -521,8 +521,12 @@ pub async fn preview_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Opti
             std::fs::read(&path)?
         }
         Err(_) => {
-            let data = app.fs().read(file_path)?;
-            if data.len() > 20 * 1024 * 1024 {
+            use std::io::Read;
+            const MAX_OPML_BYTES: u64 = 20 * 1024 * 1024;
+            let file = app.fs().open(file_path, tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
+            let mut data = Vec::new();
+            file.take(MAX_OPML_BYTES + 1).read_to_end(&mut data)?;
+            if data.len() as u64 > MAX_OPML_BYTES {
                 return Err(Error::msg("This file is too large to be an OPML subscription list"));
             }
             data
@@ -604,7 +608,9 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
 // Backup and restore (backup.rs), starred articles (export.rs)
 // ---------------------------------------------------------------------------
 
-const RESTORE_STAGE_FILE: &str = ".tidings-restore-stage.db";
+pub(crate) const RESTORE_STAGE_FILE: &str = ".tidings-restore-stage.db";
+pub(crate) const BACKUP_EXPORT_STAGE_FILE: &str = ".tidings-backup-export.db";
+const MAX_BACKUP_STAGE_BYTES: u64 = 512 * 1024 * 1024;
 
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
@@ -654,7 +660,7 @@ pub async fn backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<Str
         }
         Err(_) => {
             let display = display_file_name(&file_path, &filename);
-            let temp_target = state.data_dir.join(".tidings-backup-export.db");
+            let temp_target = state.data_dir.join(BACKUP_EXPORT_STAGE_FILE);
             let temp_for_copy = temp_target.clone();
             let copy_res = tokio::task::spawn_blocking(move || -> Result<()> {
                 let conn = rusqlite::Connection::open_with_flags(
@@ -711,15 +717,27 @@ pub async fn choose_backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Opt
     let (path, is_staged) = match file_path.clone().into_path() {
         Ok(path) => (path, false),
         Err(_) => {
+            use std::io::Read;
             let staged = state.data_dir.join(RESTORE_STAGE_FILE);
-            let mut src = app.fs().open(file_path, tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
+            let src = app.fs().open(file_path, tauri_plugin_fs::OpenOptions::new().read(true).clone())?;
             let (temp, mut dst) = files::private_temp(&staged)?;
-            let copy = std::io::copy(&mut src, &mut dst)
-                .and_then(|_| dst.sync_all())
-                .and_then(|()| std::fs::rename(&temp, &staged));
-            if let Err(err) = copy {
-                let _ = std::fs::remove_file(&temp);
-                return Err(err.into());
+            let mut limited = src.take(MAX_BACKUP_STAGE_BYTES + 1);
+            let copied = std::io::copy(&mut limited, &mut dst);
+            match copied {
+                Ok(n) if n > MAX_BACKUP_STAGE_BYTES => {
+                    let _ = std::fs::remove_file(&temp);
+                    return Err(Error::msg("This backup file is too large to import (limit 512 MB)"));
+                }
+                Ok(_) => {
+                    if let Err(err) = dst.sync_all().and_then(|()| std::fs::rename(&temp, &staged)) {
+                        let _ = std::fs::remove_file(&temp);
+                        return Err(err.into());
+                    }
+                }
+                Err(err) => {
+                    let _ = std::fs::remove_file(&temp);
+                    return Err(err.into());
+                }
             }
             (staged, true)
         }
@@ -733,14 +751,33 @@ pub async fn choose_backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Opt
     }
     let current = state.settings();
     let file = path.clone();
-    let mut summary = tokio::task::spawn_blocking(move || backup::inspect(&file, &current))
+    let inspect_res = tokio::task::spawn_blocking(move || backup::inspect(&file, &current))
         .await
-        .map_err(|e| Error::msg(e.to_string()))??;
+        .map_err(|e| Error::msg(e.to_string()))?;
+    let mut summary = match inspect_res {
+        Ok(s) => s,
+        Err(err) => {
+            if is_staged {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Err(err);
+        }
+    };
     if is_staged {
         summary.file_name = display_name;
     }
     *state.restore_file.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
     Ok(Some(summary))
+}
+
+/// Forgets the backup `choose_backup` staged and removes any temporary copy.
+#[tauri::command]
+pub fn cancel_restore(state: AppStateRef<'_>) {
+    let taken = state.restore_file.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let staged = state.data_dir.join(RESTORE_STAGE_FILE);
+    if taken.as_deref() == Some(staged.as_path()) || staged.exists() {
+        let _ = std::fs::remove_file(&staged);
+    }
 }
 
 #[derive(Debug, Serialize)]

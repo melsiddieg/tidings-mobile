@@ -342,11 +342,84 @@ async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
     }
 }
 
+/// Quick pre-check on raw SVG XML bytes before handing to `usvg` in-process on Android:
+/// rejects excessive tag nesting (> 64 open elements) or excessive `<use` references.
+#[cfg(any(target_os = "android", test))]
+fn svg_precheck_ok(bytes: &[u8]) -> bool {
+    const MAX_DEPTH: usize = 64;
+    const MAX_USES: usize = 64;
+    let Ok(text) = std::str::from_utf8(bytes) else { return false };
+    let mut depth = 0usize;
+    let mut uses = 0usize;
+    let raw = text.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if raw[i..].starts_with(b"<!--") {
+            if let Some(end) = text[i + 4..].find("-->") {
+                i = i + 4 + end + 3;
+                continue;
+            }
+            return false;
+        }
+        if raw[i..].starts_with(b"<![CDATA[") {
+            if let Some(end) = text[i + 9..].find("]]>") {
+                i = i + 9 + end + 3;
+                continue;
+            }
+            return false;
+        }
+        if raw.get(i + 1).is_some_and(|&b| b == b'?' || b == b'!') {
+            let Some(end) = text[i + 1..].find('>') else { return false };
+            i = i + 1 + end + 1;
+            continue;
+        }
+        let Some(rel_end) = text[i + 1..].find('>') else { return false };
+        let tag = text[i + 1..i + 1 + rel_end].trim();
+        if tag.starts_with('/') {
+            depth = depth.saturating_sub(1);
+        } else {
+            let name = tag.split(|c: char| c.is_ascii_whitespace() || c == '/').next().unwrap_or("");
+            if name.eq_ignore_ascii_case("use") || name.to_ascii_lowercase().ends_with(":use") {
+                uses += 1;
+                if uses > MAX_USES {
+                    return false;
+                }
+            }
+            if !tag.ends_with('/') {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return false;
+                }
+            }
+        }
+        i = i + 1 + rel_end + 1;
+    }
+    true
+}
+
 /// On Android, the app runs inside the Zygote process rather than a standalone
-/// executable, so SVGs are drawn on a dedicated thread with an 8 MB stack.
+/// executable. To prevent malicious article SVGs from crashing or exhausting memory
+/// in-process, SVGs are only rasterized for small feed icons (`Use::Icon`), serialized
+/// one at a time, pre-checked for XML depth, and remembered in a refusal cache on timeout.
 #[cfg(target_os = "android")]
 async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
-    if bytes.len() > MAX_SVG_BYTES {
+    use std::hash::{BuildHasher, RandomState};
+    use tokio::sync::Mutex;
+
+    const MAX_ANDROID_ICON_SVG: usize = 256 * 1024;
+    if usage != Use::Icon || bytes.len() > MAX_ANDROID_ICON_SVG || !svg_precheck_ok(bytes) {
+        return None;
+    }
+    static LOCK: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+    static KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
+    let fingerprint = KEY.hash_one(bytes);
+    let mut refused = LOCK.lock().await;
+    if refused.contains(&fingerprint) {
         return None;
     }
     let data = bytes.to_vec();
@@ -358,7 +431,17 @@ async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
             let _ = tx.send(svg(&data, usage));
         })
         .ok()?;
-    tokio::time::timeout(WORKER_TIMEOUT, rx).await.ok()?.ok().flatten()
+    match tokio::time::timeout(WORKER_TIMEOUT, rx).await {
+        Ok(Ok(Some(clean))) => Some(clean),
+        Ok(Ok(None)) => None,
+        _ => {
+            if refused.len() >= MAX_REFUSED {
+                refused.clear();
+            }
+            refused.insert(fingerprint);
+            None
+        }
+    }
 }
 
 /// The SVG helper process: `main` calls this, and nothing else, when the program

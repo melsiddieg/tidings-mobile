@@ -50,7 +50,7 @@ impl Net {
     pub fn new(settings: &Settings) -> Result<Self> {
         let proxied = !settings.proxy.is_empty();
         let web = public_only(base_builder(settings)?, proxied, 8).build()?;
-        let image = public_only(base_builder(settings)?.timeout(Duration::from_secs(25)), proxied, 5).build()?;
+        let image = public_only(base_builder(settings)?.timeout(Duration::from_secs(25)), proxied, 10).build()?;
         // A private host may redirect within itself (http to https, a moved path),
         // and nowhere else. This client does not check DNS answers (the host it is
         // for is private), so a redirect to another name could lead to any other

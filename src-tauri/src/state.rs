@@ -110,6 +110,9 @@ impl AppState {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700));
         }
+        // Clean up any temporary staging files from an interrupted Android backup/restore.
+        let _ = std::fs::remove_file(data_dir.join(crate::commands::RESTORE_STAGE_FILE));
+        let _ = std::fs::remove_file(data_dir.join(crate::commands::BACKUP_EXPORT_STAGE_FILE));
         let conn = db::open(&data_dir.join("tidings.db"))?;
         db::clear_new_flags(&conn)?;
         // If the saved settings or the proxy in them cannot be used, do not connect
