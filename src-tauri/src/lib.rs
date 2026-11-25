@@ -11,6 +11,7 @@ mod feed_types;
 mod feeds;
 mod files;
 mod images;
+mod language;
 mod media;
 mod media_server;
 #[cfg(desktop)]
@@ -333,6 +334,7 @@ pub fn run() {
             commands::stop_translation,
             commands::feed_activity,
             commands::count_articles,
+            commands::language_counts,
             commands::list_searches,
             commands::save_search,
             commands::rename_search,

@@ -43,6 +43,7 @@
 		5D398D1CB3C27FFE9F027E1D /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		60C17CB15348DA2E4E825CEE /* media.rs */ = {isa = PBXFileReference; path = media.rs; sourceTree = "<group>"; };
 		625BB792D63F8EB350A8B837 /* settings.rs */ = {isa = PBXFileReference; path = settings.rs; sourceTree = "<group>"; };
+		636AD2FBD4089362889C9B12 /* language.rs */ = {isa = PBXFileReference; path = language.rs; sourceTree = "<group>"; };
 		63D8C74D4EB5F6C28C1DAAAB /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		6BE8F41436AD92967D0D4CEC /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
 		6E0C4145E400F736DEFE92AE /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
@@ -176,6 +177,7 @@
 				1611CD41375EA8496962ABA3 /* feeds.rs */,
 				DA1705FB50FCAC41F1C9B6A1 /* files.rs */,
 				18D4E7B6809DBD7F81B3FB53 /* images.rs */,
+				636AD2FBD4089362889C9B12 /* language.rs */,
 				FC4AB97E8EB2AF1684501B51 /* lib.rs */,
 				6BE8F41436AD92967D0D4CEC /* main.rs */,
 				A0D36FE0131D30C30E509FE1 /* media_server.rs */,
@@ -215,20 +217,6 @@
 			children = (
 			);
 			path = Externals;
-			sourceTree = "<group>";
-		};
-		"TEMP_1195FD81-51B2-483E-8468-5F7DF627ADD3" /* x86_64 */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = x86_64;
-			sourceTree = "<group>";
-		};
-		"TEMP_36BF6ABD-973B-48B6-8AE9-89995CAD4806" /* arm64 */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = arm64;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */

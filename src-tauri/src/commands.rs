@@ -53,26 +53,20 @@ pub struct ArticleDetail {
     /// "zh" (Chinese), "ar" (Arabic) or "" (another language): the UI offers the
     /// translations that fit it and `Settings::translate_to`.
     pub language: &'static str,
-    /// For an article the UI offers to translate, in the article view: where its
-    /// translated paragraphs and its images go (`translate::layout`). Empty otherwise.
+    /// In the article view: where a translation's paragraphs and the article's images
+    /// go (`translate::layout`). Every article can be translated, into Arabic at
+    /// least. Empty in the combined view.
     pub translation_layout: Vec<translate::Block>,
 }
 
-/// `translate_to`: the usual translation language, with `Some` when the article
-/// view asks, so `translation_layout` is filled for an article it can translate:
-/// with Arabic, every article; with English, Chinese and Arabic ones.
-fn detail(row: ArticleRow, load_images: bool, full_text: bool, translate_to: Option<translate::Lang>) -> ArticleDetail {
+/// `layout`: fill `translation_layout`, for the article view.
+fn detail(row: ArticleRow, load_images: bool, full_text: bool, layout: bool) -> ArticleDetail {
     let use_full = full_text && row.full_content.is_some();
     let source = if use_full { row.full_content.as_deref() } else { row.content.as_deref() };
     let rendered = sanitize::render(source.unwrap_or(""), load_images);
     let text = sanitize::plain_text(&rendered.html);
     let language = translate::language(&format!("{} {}", row.title, text.chars().take(2_000).collect::<String>()));
-    let translatable = match translate_to {
-        Some(translate::Lang::Arabic) => true,
-        Some(translate::Lang::English) => !language.is_empty(),
-        None => false,
-    };
-    let translation_layout = if translatable { translate::layout(source.unwrap_or(""), load_images) } else { Vec::new() };
+    let translation_layout = if layout { translate::layout(source.unwrap_or(""), load_images) } else { Vec::new() };
     ArticleDetail {
         id: row.id,
         feed_id: row.feed_id,
@@ -141,7 +135,7 @@ pub fn list_articles_full(
     let conn = state.db();
     let ids = db::list_article_ids(&conn, &query)?;
     ids.into_iter()
-        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false, None)))
+        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false, false)))
         .collect()
 }
 
@@ -154,7 +148,7 @@ pub fn get_article(
 ) -> Result<ArticleDetail> {
     let settings = state.settings();
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load_images.unwrap_or(settings.load_images), full_text.unwrap_or(false), Some(translate_to(&settings))))
+    Ok(detail(row, load_images.unwrap_or(settings.load_images), full_text.unwrap_or(false), true))
 }
 
 /// Downloads the linked web page and extracts the full article (reader mode).
@@ -178,7 +172,7 @@ pub async fn fetch_full_text(
         db::save_full_content(&*state.db_since(generation)?, id, &extracted.html)?;
     }
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load_images.unwrap_or(settings.load_images), true, Some(translate_to(&settings))))
+    Ok(detail(row, load_images.unwrap_or(settings.load_images), true, true))
 }
 
 /// Reader pages kept in memory hold at most this much HTML together.
@@ -261,8 +255,10 @@ pub fn mark_all_read(
     since: Option<i64>,
     until: Option<i64>,
     feed_type: Option<String>,
+    language: Option<String>,
 ) -> Result<usize> {
-    db::mark_scope_read(&state.db(), &scope, &db::DateRange { since, until }, feed_type.as_deref())
+    let range = db::DateRange { since, until };
+    db::mark_scope_read(&state.db(), &scope, &range, feed_type.as_deref(), language.as_deref())
 }
 
 #[tauri::command]
@@ -1152,6 +1148,12 @@ pub fn feed_activity(state: AppStateRef<'_>) -> Result<Vec<db::FeedActivity>> {
 #[tauri::command]
 pub fn count_articles(state: AppStateRef<'_>, query: ListQuery) -> Result<i64> {
     db::count_articles(&state.db(), &query)
+}
+
+/// The languages of the articles in the list's scope and feed type, with counts.
+#[tauri::command]
+pub fn language_counts(state: AppStateRef<'_>, query: ListQuery) -> Result<Vec<db::LanguageCount>> {
+    db::language_counts(&state.db(), &query.scope, query.feed_type.as_deref())
 }
 
 #[tauri::command]

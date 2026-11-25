@@ -27,6 +27,15 @@ Source: <https://github.com/melsiddieg/tidings>
   goes back to the detected type.
   Inside a folder (and in All articles and Starred), icons above the list show one type
   at a time, with unread counts; "Mark all as read" then marks only that type.
+- **Language filter**: when a folder, a feed type or any other list holds articles in
+  more than one language, a menu above the list shows one language at a time, with
+  unread counts. Tidings works out each article's language on your computer from its
+  title and excerpt: by the writing system (Arabic, Persian, Urdu, Chinese, Japanese,
+  Korean, Russian, Ukrainian, Greek, Hebrew, Thai, Hindi), and for Latin letters by
+  common words (English, French, German, Spanish, Portuguese, Italian, Dutch). An
+  article that shows no language, such as a release called "v2.4.1", goes with the
+  usual language of its feed, else the language the feed declares, else **Other**.
+  "Mark all as read" and saved searches follow the chosen language.
 - **Date filter**: Today, Yesterday, Last 7 or 30 days, This year, Older than 30 days or
   a custom range. It combines with everything else, and "Mark all as read" follows it,
   so *Older than 30 days* then *Mark all as read* clears a backlog.
@@ -66,13 +75,13 @@ Source: <https://github.com/melsiddieg/tidings>
   service, and it only sees titles, feed names, dates and short excerpts. Off until you
   choose a model in Settings → Local AI.
 - **Translate articles** into English or Arabic with the same local model, paragraph by
-  paragraph, with the article's images in place. Settings → Local AI → **Translate into**
-  picks the usual language. With English, Chinese and Arabic articles get a Translate
-  button (or `T`). With Arabic, every article not in Arabic does, and the Arabic text is
-  shown right to left. Under a translation, one click switches to the other language
-  where it fits (a Chinese article into Arabic, for example). Translations are kept, one
-  per language, until the article's text changes. Qwen models translate Chinese and
-  Arabic well; Settings → Local AI can name a model for translations only.
+  paragraph, with the article's images in place. The arrow next to Translate (in the
+  article's toolbar) chooses the language for this article and sets the usual one; the
+  button itself, or `T`, translates into the usual one. Into English: Chinese and Arabic
+  articles. Into Arabic: any article not in Arabic, shown right to left. Translations
+  are kept, one per language, until the article's text changes. Qwen models translate
+  Chinese and Arabic well; Settings → Local AI can name a model for translations only
+  and also sets the usual language.
 - **Filter rules** (Settings → Rules): when the title, the text, the author or the link
   contains certain words, mark the article as read, star it or delete it. For all
   feeds, a folder or one feed. Rules run on new articles; you can also apply a rule to
@@ -100,7 +109,7 @@ Source: <https://github.com/melsiddieg/tidings>
   top (and ⌘N) adds to the selected folder, or to the folder of the selected feed.
 - Favorites: pin feeds and folders to the top of the sidebar.
 - **Saved searches**: keep a list as it is (a feed or folder, unread or all, search words,
-  dates, a feed type) under a name in the sidebar, with its unread count. Dates such as
+  dates, a feed type, a language) under a name in the sidebar, with its unread count. Dates such as
   "Last 7 days" stay relative. Save one from the view options above the list or the `…`
   menu; rename or delete it with a right click.
 - **Feed health** (`…` menu): feeds that fail, with their error and when they last
@@ -235,8 +244,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.15.0-freebsd-x86_64.tar.gz
-./tidings-0.15.0-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.16.0-freebsd-x86_64.tar.gz
+./tidings-0.16.0-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next
@@ -410,7 +419,7 @@ backend is only loaded in development and is not part of release builds.
 | `L` | Listen to the video's sound in the podcast player |
 | `F` | Load the full article |
 | `I` | Show or hide images |
-| `T` | Translate the article (into English or Arabic, see Settings → Local AI), or show the original |
+| `T` | Translate the article into the usual language (or choose one), or show the original |
 | `S` | Star |
 | `M` | Mark read / unread |
 | `C` | Copy link |
@@ -448,6 +457,7 @@ src-tauri/src/
   updates.rs             Security check: are Tidings, yt-dlp and WebKitGTK up to date?
   brief.rs               AI briefs written by a local model (Ollama, LM Studio, llama.cpp)
   translate.rs           Translation into English or Arabic by the same local model
+  language.rs            The language of each article, for the language filter
   rules.rs               Filter rules: matching words in new articles
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup
